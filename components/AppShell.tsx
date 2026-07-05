@@ -3,25 +3,40 @@
 import { useEffect, useState } from "react";
 import { ACCENTS, BASE } from "@/lib/design";
 import type { Coach, Piece } from "@/lib/types";
+import { createClient, hasSupabaseEnv } from "@/lib/supabase/client";
 import Business from "./Business";
 import Review from "./Review";
 import TabBar, { type Tab } from "./TabBar";
 import Today from "./Today";
 
-// The whole app is three tabs and a sheet. Phase 1 keeps piece state in
-// memory (Demo Mode); later phases read and write Supabase instead.
+// The whole app is three tabs and a sheet. Demo Mode keeps piece state in
+// memory; signed-in coaches persist their profile changes to Supabase.
 export default function AppShell({
   coach,
+  coachId,
   initialPieces,
   demo,
 }: {
   coach: Coach;
+  coachId?: string;
   initialPieces: Piece[];
   demo: boolean;
 }) {
   const [tab, setTab] = useState<Tab>("today");
   const [pieces, setPieces] = useState<Piece[]>(initialPieces);
-  const [mission, setMission] = useState(coach.mission);
+  const [mission, setMissionState] = useState(coach.mission);
+
+  const setMission = (m: string) => {
+    setMissionState(m);
+    // Persist for real coaches — the mission re-aims all future writing.
+    if (!demo && coachId && hasSupabaseEnv()) {
+      createClient()
+        .from("coaches")
+        .update({ mission: m })
+        .eq("id", coachId)
+        .then(undefined, () => {});
+    }
+  };
 
   const accent = coach.accentHex;
   const accentDeep =

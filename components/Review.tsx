@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { BASE, TYPE_COLORS } from "@/lib/design";
 import type { Piece } from "@/lib/types";
 import DayStrip from "./DayStrip";
@@ -24,24 +24,8 @@ export default function Review({
   const total = pieces.length;
   const doneCount = total - queue.length;
 
-  const [dx, setDx] = useState(0);
-  const [fly, setFly] = useState<"left" | "right" | null>(null);
-  const [sheet, setSheet] = useState(false);
-  const [detail, setDetail] = useState(false);
   const [hint, setHint] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
-  const startX = useRef<number | null>(null);
-  const dxRef = useRef(0);
-  const moved = useRef(false);
-  const pieceId = piece?.id;
-
-  useEffect(() => {
-    setDx(0);
-    setFly(null);
-    setSheet(false);
-    setDetail(false);
-    dxRef.current = 0;
-  }, [pieceId]);
 
   if (total === 0) {
     return (
@@ -73,26 +57,111 @@ export default function Review({
   if (!piece)
     return <DoneScreen pieces={pieces} goToday={goToday} accent={accent} />;
 
+  const approve = (p: Piece) => {
+    setHint(false);
+    setToast(`Approved · ${p.slot}`);
+    setTimeout(() => setToast(null), 1600);
+    setTimeout(() => onDecision(p.id, "approved"), 380);
+  };
+  const skip = (p: Piece, reason: string | null) => {
+    setHint(false);
+    setTimeout(() => onDecision(p.id, "skipped", reason), 340);
+  };
+
+  return (
+    <div className="flex-1 flex flex-col relative overflow-hidden">
+      <div className="flex items-center justify-between px-5 pt-3 pb-2">
+        <span style={{ fontSize: 13, fontWeight: 700, color: BASE.ink }}>
+          {doneCount + 1} of {total}
+        </span>
+        <span style={{ fontSize: 12, fontWeight: 600, color: BASE.muted }}>
+          Today&apos;s session
+        </span>
+      </div>
+      <SwipeCard
+        key={piece.id}
+        piece={piece}
+        next={queue[1]}
+        accent={accent}
+        showHint={hint && doneCount === 0}
+        onInteract={() => setHint(false)}
+        onApprove={() => approve(piece)}
+        onSkip={(reason) => skip(piece, reason)}
+      />
+      {toast && (
+        <div className="absolute inset-x-0 flex justify-center sl-rise" style={{ top: 8 }}>
+          <span
+            style={{
+              fontSize: 12.5,
+              fontWeight: 700,
+              color: "#fff",
+              background: BASE.ink,
+              borderRadius: 999,
+              padding: "9px 18px",
+              boxShadow: "0 12px 30px -12px rgba(0,0,0,0.5)",
+            }}
+          >
+            ✓ {toast}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One card in the stack. Keyed by piece.id, so all swipe state resets
+// naturally when the next piece slides up.
+function SwipeCard({
+  piece,
+  next,
+  accent,
+  showHint,
+  onInteract,
+  onApprove,
+  onSkip,
+}: {
+  piece: Piece;
+  next?: Piece;
+  accent: string;
+  showHint: boolean;
+  onInteract: () => void;
+  onApprove: () => void;
+  onSkip: (reason: string | null) => void;
+}) {
+  const [dx, setDx] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const [fly, setFly] = useState<"left" | "right" | null>(null);
+  const [sheet, setSheet] = useState(false);
+  const [detail, setDetail] = useState(false);
+  const startX = useRef<number | null>(null);
+  const dxRef = useRef(0);
+  const moved = useRef(false);
+
   const setDrag = (v: number) => {
     dxRef.current = v;
     setDx(v);
   };
   const approve = () => {
-    setHint(false);
+    onInteract();
     setFly("right");
-    setToast(`Approved · ${piece.slot}`);
-    setTimeout(() => setToast(null), 1600);
-    setTimeout(() => onDecision(piece.id, "approved"), 380);
+    onApprove();
   };
   const askSkip = () => {
-    setHint(false);
+    onInteract();
     setSheet(true);
     setDrag(-56);
   };
+  const skipWith = (reason: string | null) => {
+    setSheet(false);
+    setFly("left");
+    onSkip(reason);
+  };
+
   const down = (e: React.PointerEvent<HTMLDivElement>) => {
     if (sheet || detail || fly) return;
     startX.current = e.clientX;
     moved.current = false;
+    setDragging(true);
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const move = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -105,17 +174,13 @@ export default function Review({
     if (startX.current === null) return;
     const d = dxRef.current;
     startX.current = null;
+    setDragging(false);
     if (d > 90) approve();
     else if (d < -90) askSkip();
     else {
       setDrag(0);
       if (!moved.current) setDetail(true);
     }
-  };
-  const skipWith = (reason: string | null) => {
-    setSheet(false);
-    setFly("left");
-    setTimeout(() => onDecision(piece.id, "skipped", reason), 340);
   };
 
   const transform =
@@ -126,17 +191,9 @@ export default function Review({
       : `translateX(${dx}px) rotate(${dx / 22}deg)`;
 
   return (
-    <div className="flex-1 flex flex-col relative overflow-hidden">
-      <div className="flex items-center justify-between px-5 pt-3 pb-2">
-        <span style={{ fontSize: 13, fontWeight: 700, color: BASE.ink }}>
-          {doneCount + 1} of {total}
-        </span>
-        <span style={{ fontSize: 12, fontWeight: 600, color: BASE.muted }}>
-          Today&apos;s session
-        </span>
-      </div>
+    <>
       <div className="flex-1 relative px-5 pb-2" style={{ touchAction: "pan-y" }}>
-        {queue[1] && (
+        {next && (
           <div
             className="absolute rounded-3xl overflow-hidden"
             style={{
@@ -145,7 +202,7 @@ export default function Review({
               opacity: 0.5,
             }}
           >
-            <Footage piece={queue[1]} playing={false} />
+            <Footage piece={next} playing={false} />
           </div>
         )}
         <div
@@ -159,7 +216,7 @@ export default function Review({
             transform,
             transition: fly
               ? "transform 0.38s ease-in, opacity 0.38s"
-              : startX.current !== null
+              : dragging
               ? "none"
               : "transform 0.25s ease-out",
             opacity: fly ? 0 : 1,
@@ -252,7 +309,7 @@ export default function Review({
             </p>
           </div>
         </div>
-        {hint && doneCount === 0 && !detail && !sheet && (
+        {showHint && !detail && !sheet && (
           <div
             className="absolute inset-x-0 flex justify-center sl-fade"
             style={{ bottom: 24, pointerEvents: "none" }}
@@ -307,24 +364,6 @@ export default function Review({
           ✓
         </button>
       </div>
-
-      {toast && (
-        <div className="absolute inset-x-0 flex justify-center sl-rise" style={{ top: 8 }}>
-          <span
-            style={{
-              fontSize: 12.5,
-              fontWeight: 700,
-              color: "#fff",
-              background: BASE.ink,
-              borderRadius: 999,
-              padding: "9px 18px",
-              boxShadow: "0 12px 30px -12px rgba(0,0,0,0.5)",
-            }}
-          >
-            ✓ {toast}
-          </span>
-        </div>
-      )}
 
       {sheet && (
         <div
@@ -503,7 +542,7 @@ export default function Review({
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 

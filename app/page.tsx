@@ -19,12 +19,26 @@ export default async function Home() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  // Phase 1: a logged-in coach sees the shell with an empty queue.
-  // Phase 2 replaces this with the coach's real profile from the DB.
+  // Load the coach's profile ("Coach DNA"). New signups go to onboarding.
+  const { data: coachRow } = await supabase
+    .from("coaches")
+    .select("id, name, mission, accent_hex")
+    .eq("auth_user_id", user.id)
+    .maybeSingle();
+
+  if (!coachRow) redirect("/onboarding");
+
   const coach = {
-    name: user.email?.split("@")[0] ?? "Coach",
-    mission: "More private clients",
-    accentHex: "#C8102E",
+    name: coachRow.name,
+    mission: coachRow.mission ?? "More private clients",
+    accentHex: coachRow.accent_hex ?? "#C8102E",
   };
-  return <AppShell coach={coach} initialPieces={[]} demo={false} />;
+  return (
+    <AppShell
+      coach={coach}
+      coachId={coachRow.id}
+      initialPieces={[]}
+      demo={false}
+    />
+  );
 }

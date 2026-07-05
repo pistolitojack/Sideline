@@ -1,38 +1,42 @@
 # Sideline — Build Progress
 
-## Phase 1 — Scaffold, auth, 3-tab shell, Demo Mode ✅ (built, awaiting your review)
+## Phase 2 — Onboarding + real Coach DNA ✅ (built, awaiting your review)
 
 **What's done**
-- Next.js (App Router) + Tailwind project scaffolded; mobile-first, matches the
-  prototype's design (warm paper background, ink text, Signal Red accent).
-- **Demo Mode**: with `NEXT_PUBLIC_DEMO_MODE=true` the whole app works with a
-  fake coach ("Coach Dre") and 5 sample pieces — no login, no keys needed.
-- **Today tab**: big accent upload card (uploads themselves come in Phase 3),
-  Mission chip with the change-mission sheet, "N pieces ready" pill, This Week
-  strip, day dots.
-- **Review tab**: swipe stack — drag right to approve, left to skip (with the
-  3-reason sheet), tap a card for the detail sheet (hook, caption, hashtags,
-  CTA, "Why I made this", suggested slot). ✕ / ✓ buttons as swipe alternatives.
-  Clearing the stack shows the "Your week is handled" done screen with the
-  Autopilot bar.
-- **Business tab**: V1 placeholder card + mission line (per SPEC — no fake numbers).
-- **Auth**: email magic-link sign-in via Supabase (login page, callback route,
-  middleware protecting the app). If Supabase keys aren't set, the login page
-  explains what to do instead of crashing.
-- Terms of Service + Privacy Policy placeholder pages (with the athlete-consent line).
+- **Full onboarding flow** matching the prototype: welcome → Instagram handle
+  (with the 2s "studying your page" moment — real scraping is V2) → Coach DNA
+  card (name, sport chips, brand color, tone chips) → **voice memo** (real
+  in-browser recording up to 60s, transcribed with Deepgram, transcript stored)
+  → mission → straight into the app.
+- Everything is saved to a real **`coaches` table in Supabase**, protected by
+  Row Level Security (each coach can only see their own data).
+- **Your brand color restyles the whole app** — chosen in onboarding, stored in
+  the DB, applied to every accent in Today/Review/Business.
+- New signups are automatically routed: sign in → no profile yet → onboarding
+  → Today screen with your name and color.
+- Mission changes from the Today screen now save to the database.
+- `supabase/schema.sql` — the entire database schema (all V1 tables + security
+  rules) ready to paste into Supabase once.
 
-**How to test**
-1. `npm install`
-2. Copy `.env.local.example` to `.env.local` (Demo Mode is already on in it).
-3. `npm run dev` and open http://localhost:3000 on your computer — or on your
-   phone via your computer's local IP (e.g. http://192.168.x.x:3000).
-4. Click through Today / Review / Business. Swipe the cards. Tap a card for
-   details. Clear the stack to see the done screen.
-5. To test real login: create a free Supabase project, paste its URL and anon
-   key into `.env.local`, set `NEXT_PUBLIC_DEMO_MODE=false`, restart, and sign
-   in with your email.
+**How to test (the "first user" experience)**
+1. Create a free project at supabase.com.
+2. In the Supabase dashboard: SQL Editor → paste all of `supabase/schema.sql` → Run.
+3. Settings → API: copy the Project URL and anon key.
+4. In Vercel (project → Settings → Environment Variables) set:
+   - `NEXT_PUBLIC_SUPABASE_URL` = your project URL
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY` = your anon key
+   - `NEXT_PUBLIC_DEMO_MODE` = `false`
+   - `DEEPGRAM_API_KEY` = (optional, from console.deepgram.com — needed for
+     the voice memo transcription; without it that step offers a skip)
+5. In Supabase: Authentication → URL Configuration → set Site URL to your
+   Vercel URL (e.g. `https://sideline-xyz.vercel.app`).
+6. Redeploy on Vercel, open the link on your phone, and sign up with your email.
 
-## What's next — Phase 2
-Onboarding flow (welcome → Instagram handle → Coach DNA card → in-browser
-voice memo with Deepgram transcription → mission), storing a real coach row in
-Supabase, and the coach's accent color applied app-wide from the DB.
+## Phase 1 — Scaffold, auth, 3-tab shell, Demo Mode ✅
+- Next.js + Tailwind, prototype design, Demo Mode with 5 seeded pieces,
+  Today/Review/Business tabs, swipe review with skip reasons + detail sheet,
+  magic-link auth, Terms/Privacy placeholders.
+
+## What's next — Phase 3
+Multi-video upload from the phone camera roll to Supabase storage with
+progress bars, session + job rows created, and the calm processing screen.
