@@ -11,19 +11,27 @@ export default function LoginPage() {
   const [state, setState] = useState<"idle" | "sending" | "sent" | "error">(
     "idle"
   );
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const configured = hasSupabaseEnv();
 
   const sendLink = async () => {
     if (!email.trim() || state === "sending") return;
     setState("sending");
+    setErrorDetail(null);
     try {
       const supabase = createClient();
       const { error } = await supabase.auth.signInWithOtp({
         email: email.trim(),
         options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
       });
-      setState(error ? "error" : "sent");
-    } catch {
+      if (error) {
+        setErrorDetail(error.message);
+        setState("error");
+      } else {
+        setState("sent");
+      }
+    } catch (e) {
+      setErrorDetail(e instanceof Error ? e.message : String(e));
       setState("error");
     }
   };
@@ -168,8 +176,20 @@ export default function LoginPage() {
               {state === "sending" ? "Sending your link…" : "Email me a sign-in link"}
             </button>
             {state === "error" && (
-              <p style={{ fontSize: 13, color: "#B3261E", marginTop: 10 }}>
-                That didn&apos;t work — check the email address and try again.
+              <p style={{ fontSize: 13, color: "#B3261E", marginTop: 10, lineHeight: 1.5 }}>
+                That didn&apos;t work — try again in a moment.
+                {errorDetail && (
+                  <span
+                    style={{
+                      display: "block",
+                      marginTop: 4,
+                      fontSize: 12,
+                      color: BASE.muted,
+                    }}
+                  >
+                    Details: {errorDetail}
+                  </span>
+                )}
               </p>
             )}
           </>
