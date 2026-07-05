@@ -18,7 +18,7 @@ export default function LoginPage() {
   const configured = hasSupabaseEnv();
 
   const verifyCode = async () => {
-    if (code.length !== 6 || verifying) return;
+    if (code.length < 6 || verifying) return;
     setVerifying(true);
     setVerifyError(null);
     try {
@@ -161,17 +161,17 @@ export default function LoginPage() {
                 lineHeight: 1.5,
               }}
             >
-              We emailed a 6-digit code to <b>{email}</b>. Type it here:
+              We emailed a sign-in code to <b>{email}</b>. Type it here:
             </p>
             <input
               inputMode="numeric"
               autoComplete="one-time-code"
               value={code}
               onChange={(e) =>
-                setCode(e.target.value.replace(/\D/g, "").slice(0, 6))
+                setCode(e.target.value.replace(/\D/g, "").slice(0, 10))
               }
               onKeyDown={(e) => e.key === "Enter" && verifyCode()}
-              placeholder="123456"
+              placeholder="12345678"
               style={{
                 fontSize: 24,
                 fontWeight: 700,
@@ -189,13 +189,13 @@ export default function LoginPage() {
             />
             <button
               onClick={verifyCode}
-              disabled={code.length !== 6 || verifying}
+              disabled={code.length < 6 || verifying}
               style={{
                 border: "none",
-                cursor: code.length === 6 ? "pointer" : "default",
+                cursor: code.length >= 6 ? "pointer" : "default",
                 borderRadius: 14,
-                background: code.length === 6 ? ACCENT : BASE.faint,
-                color: code.length === 6 ? "#fff" : BASE.muted,
+                background: code.length >= 6 ? ACCENT : BASE.faint,
+                color: code.length >= 6 ? "#fff" : BASE.muted,
                 fontSize: 15,
                 fontWeight: 700,
                 padding: "14px 0",
