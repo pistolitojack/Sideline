@@ -1,0 +1,102 @@
+import type { Coach, Piece } from "./types";
+
+// Demo Mode (SPEC.md non-negotiable): when NEXT_PUBLIC_DEMO_MODE=true the whole
+// UI is reviewable with a fake coach and 5 sample pieces — no login, no backend.
+export const isDemoMode = () => process.env.NEXT_PUBLIC_DEMO_MODE === "true";
+
+export const DEMO_COACH: Coach = {
+  name: "Coach Dre",
+  mission: "More private clients",
+  accentHex: "#C8102E",
+};
+
+export const DEMO_PIECES: Piece[] = [
+  {
+    id: 1,
+    kind: "Reel",
+    type: "Teaching",
+    img: "/demo/c1.jpg",
+    dur: "0:13",
+    platforms: ["Reels", "TikTok"],
+    slot: "Tue · 6:12 PM",
+    day: 1,
+    words: ["FAST", "FEET", "AREN'T", "BORN."],
+    hook: "Fast feet aren't born. They're built.",
+    caption:
+      "Quick feet into sled starts — then we slow it all the way down and fix the details. That last part is where speed actually comes from.",
+    tags: "#speedtraining #youthathlete #agility #sportsperformance",
+    cta: "DM the word SPEED to get your athlete started.",
+    why: "Teaching posts build parent trust before they ever DM — and your last drill breakdown beat your page average 3×. Ends on you coaching: that's the product.",
+    status: "ready",
+  },
+  {
+    id: 2,
+    kind: "Reel",
+    type: "Hype",
+    img: "/demo/c2.jpg",
+    dur: "0:13",
+    platforms: ["TikTok", "Reels"],
+    slot: "Thu · 5:45 PM",
+    day: 3,
+    words: ["SPEED", "IS", "A", "SKILL."],
+    hook: "Speed is a skill. Not a gift.",
+    caption:
+      "Every yard of this sled push is teaching his body to produce force faster. You don't wait to get fast. You train it.",
+    tags: "#sledpush #speedwork #athletedevelopment #youthsports",
+    cta: "DM the word SPEED to start.",
+    why: "Pure effort, visible in the first second. High-energy clips are your best reach — so this one carries the DM call-to-action for the mission.",
+    status: "ready",
+  },
+  {
+    id: 3,
+    kind: "Reel",
+    type: "Story",
+    img: "/demo/c3.jpg",
+    dur: "0:17",
+    platforms: ["Reels"],
+    slot: "Sat · 9:15 AM",
+    day: 5,
+    words: ["NOBODY'S", "WATCHING."],
+    hook: "Nobody's watching. That's the point.",
+    caption:
+      "Evening session. No stands, no applause. Resisted sprints, week 3. What we build in the dark shows up under the lights.",
+    tags: "#thegrind #resistedsprints #speedcoach #trusttheprocess",
+    cta: "",
+    why: "Evening, no audience — the story parents share. Scheduled Saturday morning, your peak reach window.",
+    status: "ready",
+  },
+  {
+    id: 4,
+    kind: "Story",
+    type: "Behind the scenes",
+    img: "/demo/c4.jpg",
+    dur: "0:08",
+    platforms: ["IG Story"],
+    slot: "Tonight · 8:30 PM",
+    day: 0,
+    words: ["TONIGHT'S", "SESSION"],
+    hook: "Tonight's session",
+    caption: "resisted sprints on grass — quick look at tonight's work.",
+    tags: "",
+    cta: "",
+    why: "Stories keep you present between posts. This primes tonight's viewers for Saturday's reel.",
+    status: "ready",
+  },
+  {
+    id: 5,
+    kind: "Story",
+    type: "Behind the scenes",
+    img: "/demo/c5.jpg",
+    dur: "0:08",
+    platforms: ["IG Story"],
+    slot: "Thu · 6:30 PM",
+    day: 3,
+    words: ["SPEED", "DAY"],
+    hook: "Speed day",
+    caption: "last rep hits different — full session on the feed Thursday.",
+    tags: "",
+    cta: "",
+    why: "Posts 30 minutes after Thursday's reel — story viewers get funneled to the feed post.",
+    status: "ready",
+  },
+];

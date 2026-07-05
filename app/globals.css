@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+:root {
+  --paper: #f6f5f2;
+  --card: #ffffff;
+  --ink: #1a1915;
+  --muted: #8a867c;
+  --faint: #e8e6e0;
+  --good: #1e7f4f;
+  --accent: #c8102e;
+  --accent-deep: #7e0a1d;
+}
+
+html,
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Motion vocabulary from the prototype */
+@keyframes sl-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.sl-rise {
+  animation: sl-rise 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes sl-fade {
+  0%,
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+.sl-fade {
+  animation: sl-fade 4.5s forwards;
+}
+@keyframes sl-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+}
+.sl-pulse {
+  animation: sl-pulse 2.4s ease-in-out infinite;
+}
+@keyframes sl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.sl-spin {
+  animation: sl-spin 0.9s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sl-rise,
+  .sl-fade,
+  .sl-pulse,
+  .sl-spin {
+    animation: none;
+  }
+}
