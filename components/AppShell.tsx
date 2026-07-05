@@ -9,16 +9,22 @@ import Review from "./Review";
 import TabBar, { type Tab } from "./TabBar";
 import Today from "./Today";
 
+export type ActiveSession = { id: string; status: string } | null;
+
 // The whole app is three tabs and a sheet. Demo Mode keeps piece state in
 // memory; signed-in coaches persist their profile changes to Supabase.
 export default function AppShell({
   coach,
   coachId,
+  hasVoiceMemo = true,
+  activeSession = null,
   initialPieces,
   demo,
 }: {
   coach: Coach;
   coachId?: string;
+  hasVoiceMemo?: boolean;
+  activeSession?: ActiveSession;
   initialPieces: Piece[];
   demo: boolean;
 }) {
@@ -44,7 +50,7 @@ export default function AppShell({
     "#7E0A1D";
 
   // Keep the CSS variables in sync so anything styled with var(--accent)
-  // follows the coach's brand color (fully dynamic in Phase 2).
+  // follows the coach's brand color.
   useEffect(() => {
     document.documentElement.style.setProperty("--accent", accent);
     document.documentElement.style.setProperty("--accent-deep", accentDeep);
@@ -67,7 +73,6 @@ export default function AppShell({
       style={{
         maxWidth: 430,
         height: "100dvh",
-        background: BASE.paper,
       }}
     >
       {demo && (
@@ -81,6 +86,7 @@ export default function AppShell({
             letterSpacing: "0.08em",
             textTransform: "uppercase",
             padding: "6px 0",
+            borderRadius: "0 0 14px 14px",
           }}
         >
           Demo mode — sample coach &amp; content
@@ -89,12 +95,15 @@ export default function AppShell({
       {tab === "today" && (
         <Today
           coach={coach}
+          coachId={coachId}
           accentDeep={accentDeep}
           pieces={pieces}
           mission={mission}
           setMission={setMission}
           goReview={() => setTab("review")}
           demo={demo}
+          hasVoiceMemo={hasVoiceMemo}
+          initialActiveSession={activeSession}
         />
       )}
       {tab === "review" && (

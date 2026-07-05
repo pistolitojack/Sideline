@@ -22,11 +22,21 @@ export default async function Home() {
   // Load the coach's profile ("Coach DNA"). New signups go to onboarding.
   const { data: coachRow } = await supabase
     .from("coaches")
-    .select("id, name, mission, accent_hex")
+    .select("id, name, mission, accent_hex, voice_memo_transcript")
     .eq("auth_user_id", user.id)
     .maybeSingle();
 
   if (!coachRow) redirect("/onboarding");
+
+  // The most recent session still working its way through the pipeline.
+  const { data: activeSession } = await supabase
+    .from("sessions")
+    .select("id, status")
+    .eq("coach_id", coachRow.id)
+    .in("status", ["uploading", "queued", "processing"])
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
   const coach = {
     name: coachRow.name,
@@ -37,6 +47,8 @@ export default async function Home() {
     <AppShell
       coach={coach}
       coachId={coachRow.id}
+      hasVoiceMemo={Boolean(coachRow.voice_memo_transcript)}
+      activeSession={activeSession ?? null}
       initialPieces={[]}
       demo={false}
     />

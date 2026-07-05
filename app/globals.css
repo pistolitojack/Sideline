@@ -13,14 +13,39 @@
 
 html,
 body {
-  background: var(--paper);
   color: var(--ink);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
     Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-/* Motion vocabulary from the prototype */
+/* Layered ambient background — a hint of the coach's accent bleeding into
+   the paper, like stadium light. */
+body {
+  background:
+    radial-gradient(
+      900px 520px at 85% -8%,
+      color-mix(in srgb, var(--accent) 9%, transparent),
+      transparent 65%
+    ),
+    radial-gradient(
+      700px 500px at -15% 108%,
+      color-mix(in srgb, var(--accent) 6%, transparent),
+      transparent 60%
+    ),
+    var(--paper);
+  background-attachment: fixed;
+}
+
+/* Tactile press feedback on every button */
+button {
+  transition: transform 0.12s ease;
+}
+button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* Motion vocabulary */
 @keyframes sl-rise {
   from {
     opacity: 0;
@@ -68,11 +93,48 @@ body {
 .sl-spin {
   animation: sl-spin 0.9s linear infinite;
 }
+
+/* Light sweep across the hero card — slow, expensive-feeling */
+@keyframes sl-sheen-move {
+  0% {
+    transform: translateX(-130%) skewX(-18deg);
+  }
+  55%,
+  100% {
+    transform: translateX(230%) skewX(-18deg);
+  }
+}
+.sl-sheen::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 45%;
+  background: linear-gradient(
+    100deg,
+    transparent,
+    rgba(255, 255, 255, 0.14),
+    transparent
+  );
+  animation: sl-sheen-move 5.5s ease-in-out infinite;
+}
+.sl-sheen {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Cards lift slightly on press */
+.sl-card-press:active {
+  transform: scale(0.98);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sl-rise,
   .sl-fade,
   .sl-pulse,
-  .sl-spin {
+  .sl-spin,
+  .sl-sheen::after {
     animation: none;
   }
 }
