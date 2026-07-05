@@ -12,7 +12,38 @@ export default function LoginPage() {
     "idle"
   );
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [verifying, setVerifying] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
   const configured = hasSupabaseEnv();
+
+  const verifyCode = async () => {
+    if (code.length !== 6 || verifying) return;
+    setVerifying(true);
+    setVerifyError(null);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.auth.verifyOtp({
+        email: email.trim(),
+        token: code,
+        type: "email",
+      });
+      if (error) {
+        setVerifyError(
+          error.message.toLowerCase().includes("expired") ||
+            error.message.toLowerCase().includes("invalid")
+            ? "That code didn't match — check the newest email, or send a new code."
+            : `That didn't work. Details: ${error.message}`
+        );
+        setVerifying(false);
+      } else {
+        window.location.assign("/");
+      }
+    } catch (e) {
+      setVerifyError(e instanceof Error ? e.message : String(e));
+      setVerifying(false);
+    }
+  };
 
   const sendLink = async () => {
     if (!email.trim() || state === "sending") return;
@@ -130,9 +161,80 @@ export default function LoginPage() {
                 lineHeight: 1.5,
               }}
             >
-              We sent a sign-in link to <b>{email}</b>. Tap it on this device
-              and you&apos;re in.
+              We emailed a 6-digit code to <b>{email}</b>. Type it here:
             </p>
+            <input
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              value={code}
+              onChange={(e) =>
+                setCode(e.target.value.replace(/\D/g, "").slice(0, 6))
+              }
+              onKeyDown={(e) => e.key === "Enter" && verifyCode()}
+              placeholder="123456"
+              style={{
+                fontSize: 24,
+                fontWeight: 700,
+                letterSpacing: "0.35em",
+                textAlign: "center",
+                color: BASE.ink,
+                background: BASE.paper,
+                border: `1.5px solid ${BASE.faint}`,
+                borderRadius: 14,
+                padding: "12px 8px",
+                width: "100%",
+                marginTop: 12,
+                outline: "none",
+              }}
+            />
+            <button
+              onClick={verifyCode}
+              disabled={code.length !== 6 || verifying}
+              style={{
+                border: "none",
+                cursor: code.length === 6 ? "pointer" : "default",
+                borderRadius: 14,
+                background: code.length === 6 ? ACCENT : BASE.faint,
+                color: code.length === 6 ? "#fff" : BASE.muted,
+                fontSize: 15,
+                fontWeight: 700,
+                padding: "14px 0",
+                width: "100%",
+                marginTop: 10,
+              }}
+            >
+              {verifying ? "Signing you in…" : "Sign me in"}
+            </button>
+            {verifyError && (
+              <p
+                style={{
+                  fontSize: 13,
+                  color: "#B3261E",
+                  marginTop: 10,
+                  lineHeight: 1.5,
+                }}
+              >
+                {verifyError}
+              </p>
+            )}
+            <button
+              onClick={() => {
+                setState("idle");
+                setCode("");
+                setVerifyError(null);
+              }}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontSize: 13,
+                color: BASE.muted,
+                marginTop: 12,
+                padding: 0,
+              }}
+            >
+              Didn&apos;t get it? Send a new code
+            </button>
           </div>
         ) : (
           <>
