@@ -57,13 +57,22 @@ export default function AppShell({
   }, [accent, accentDeep]);
 
   const decide = (
-    id: number,
+    id: number | string,
     status: "approved" | "skipped",
     reason?: string | null
-  ) =>
+  ) => {
     setPieces((ps) =>
       ps.map((p) => (p.id === id ? { ...p, status, skipReason: reason } : p))
     );
+    // Real pieces (uuid ids) persist; every approve/skip trains the employee.
+    if (!demo && typeof id === "string" && hasSupabaseEnv()) {
+      createClient()
+        .from("content_pieces")
+        .update({ status, skip_reason: reason ?? null })
+        .eq("id", id)
+        .then(undefined, () => {});
+    }
+  };
 
   const readyCount = pieces.filter((p) => p.status === "ready").length;
 

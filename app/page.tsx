@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import { DEMO_COACH, DEMO_PIECES, isDemoMode } from "@/lib/demo";
+import { loadPieces } from "@/lib/pieces";
 import { createClient, hasSupabaseEnv } from "@/lib/supabase/server";
 
 export default async function Home() {
@@ -38,6 +39,8 @@ export default async function Home() {
     .limit(1)
     .maybeSingle();
 
+  const pieces = await loadPieces(supabase, coachRow.id);
+
   const coach = {
     name: coachRow.name,
     mission: coachRow.mission ?? "More private clients",
@@ -49,7 +52,7 @@ export default async function Home() {
       coachId={coachRow.id}
       hasVoiceMemo={Boolean(coachRow.voice_memo_transcript)}
       activeSession={activeSession ?? null}
-      initialPieces={[]}
+      initialPieces={pieces}
       demo={false}
     />
   );

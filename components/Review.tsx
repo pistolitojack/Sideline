@@ -15,7 +15,11 @@ export default function Review({
   accent,
 }: {
   pieces: Piece[];
-  onDecision: (id: number, status: "approved" | "skipped", reason?: string | null) => void;
+  onDecision: (
+    id: number | string,
+    status: "approved" | "skipped",
+    reason?: string | null
+  ) => void;
   goToday: () => void;
   accent: string;
 }) {

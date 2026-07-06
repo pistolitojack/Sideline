@@ -5,7 +5,7 @@
 export type PieceStatus = "ready" | "approved" | "skipped" | "downloaded";
 
 export type Piece = {
-  id: number;
+  id: number | string; // number = demo seed, string = content_pieces uuid
   kind: "Reel" | "Story";
   type: string; // Teaching | Hype | Story | Behind the scenes | ...
   img: string; // path under /public

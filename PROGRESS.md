@@ -1,6 +1,44 @@
 # Sideline — Build Progress
 
-## Phase 3 — Real uploads + in-app voice memo + visual upgrade ✅ (built, awaiting your review)
+## Phase 4 — The AI pipeline (worker) ✅ built, needs deploy to run
+
+**What's done**
+- **`worker/` — the background service** (deployable on Railway): polls the
+  `jobs` table and runs the pipeline per SPEC:
+  1. **Ingest** — ffprobe every raw video (duration/resolution/audio), extract
+     clean 16kHz audio.
+  2. **Transcribe** — Deepgram with word-level timestamps (silent footage is
+     fine — it continues without speech).
+  3. **Understand** — Claude (claude-sonnet-4-6) sees sampled frames (1 per
+     ~2s, max 30, 512px) + the transcript + the coach profile and returns
+     scored, typed moments → `moments` table.
+  4. **Compose/Write** — top 3–6 diverse moments (score ≥ 0.5); Claude writes
+     each piece in the coach's voice (voice memo transcript conditions it):
+     EDL with caption beats, hook, caption, hashtags, CTA, "why", suggested
+     slot + sound style → `content_pieces` (status `ready`) with a poster
+     frame extracted from the cut.
+- Failure handling per SPEC: a failing stage retries once, then the job is
+  `failed` with the error stored and the session shows the friendly failed
+  state. No dead spinners.
+- **Review now shows real pieces** for signed-in coaches (poster frame +
+  cycling caption words + all the text), and approve/skip decisions persist
+  to the database with skip reasons.
+
+**To make it run (one-time deploy)**
+1. console.anthropic.com → sign in → add ~$5 credit → create an API key.
+2. railway.app → New Project → Deploy from GitHub repo → root directory
+   `worker` → add env vars: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+   (Supabase → Project Settings → API → service_role), `DEEPGRAM_API_KEY`,
+   `ANTHROPIC_API_KEY`.
+3. Watch the logs: "Sideline worker up". Any queued session gets picked up
+   automatically, including ones uploaded before the worker existed.
+
+**Reality check on quality:** Phase 4 output is text + a poster frame per
+piece — the writing and moment choice are the product here. The actual
+rendered vertical videos with burned-in captions (the "edited video" part)
+are Phase 5.
+
+## Phase 3 — Real uploads + in-app voice memo + visual upgrade ✅ verified on a real phone
 
 **What's done**
 - **Upload flow** (`/upload`): tap the big card on Today → pick multiple videos
@@ -41,7 +79,7 @@ with RLS, accent color applied app-wide, code-based email sign-in.
 ## Phase 1 — Scaffold, auth, 3-tab shell, Demo Mode ✅
 Next.js + Tailwind, prototype design, Demo Mode, swipe review, magic-link auth.
 
-## What's next — Phase 4
-The worker service: ingest (ffprobe/proxy/audio) → Deepgram transcription →
-Claude moment-finding → compose/write. Review shows real AI-written pieces as
-text cards. Needs: Railway account for the worker, Anthropic API key.
+## What's next — Phase 5
+ffmpeg rendering per the EDL recipe (eased crop to 9:16, accent-color hook
+plates, body captions, loudnorm, fades), video playback in Review, and
+Download video + Copy caption on approved pieces.
