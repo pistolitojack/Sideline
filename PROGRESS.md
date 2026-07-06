@@ -1,5 +1,22 @@
 # Sideline — Build Progress
 
+## Phase 5 — Rendering + playback + download ✅ built & recipe test-rendered
+
+- Worker gained a **render** stage (after compose): executes each EDL with
+  ffmpeg per the SPEC recipe — eased/center crop of landscape to 9:16 (or
+  cover-fit for vertical), accent-color hook plates, bordered body captions
+  (text via temp files), 0.35s fades, loudnorm, H.264 CRF 20 yuv420p 30fps
+  +faststart. Uploads the mp4, repoints the piece's render asset, marks it
+  ready. Idempotent — re-render jobs skip pieces that already have video.
+- Verified locally: synthetic 1920x1080 clip → 1080x1920 h264 with both
+  caption styles burned in, correct duration + audio.
+- App: Review cards **play the rendered video** (autoplay, muted, loop);
+  approved pieces on Today open a sheet with **Download video** (marks
+  status downloaded) and **Copy caption** (caption + CTA + hashtags).
+- Backfill: run `insert into jobs (session_id, stage, status) select id,
+  'render', 'pending' from sessions where status = 'ready';` once in the
+  Supabase SQL editor to render pieces made before this phase.
+
 ## Phase 4 — The AI pipeline (worker) ✅ built, needs deploy to run
 
 **What's done**

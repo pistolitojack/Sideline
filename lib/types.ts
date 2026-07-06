@@ -8,7 +8,9 @@ export type Piece = {
   id: number | string; // number = demo seed, string = content_pieces uuid
   kind: "Reel" | "Story";
   type: string; // Teaching | Hype | Story | Behind the scenes | ...
-  img: string; // path under /public
+  img: string; // poster image (public path or signed URL)
+  videoUrl?: string | null; // signed URL of the rendered video (Phase 5)
+  downloadUrl?: string | null; // same video as attachment download
   dur: string;
   platforms: string[];
   slot: string;

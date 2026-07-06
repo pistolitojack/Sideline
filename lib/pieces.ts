@@ -1,6 +1,6 @@
 // Server-side: load a coach's real content pieces and shape them for the
-// Review UI. Poster images come from private storage via short-lived
-// signed URLs.
+// Review UI. Poster images and rendered videos come from private storage
+// via short-lived signed URLs.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Piece } from "./types";
@@ -23,6 +23,7 @@ type Row = {
     out?: number;
     type?: string;
     captions?: { text: string; style?: string }[];
+    poster_asset_id?: string;
   } | null;
   render_asset_id: string | null;
   hook: string | null;
@@ -60,54 +61,74 @@ export async function loadPieces(
 
   if (!rows?.length) return [];
 
-  // Signed URLs for poster frames (Phase 4) / renders (Phase 5).
-  const assetIds = rows
-    .map((r) => (r as unknown as Row).render_asset_id)
-    .filter((v): v is string => Boolean(v));
+  // Collect every render/poster asset referenced by the pieces.
+  const assetIds = new Set<string>();
+  for (const raw of rows) {
+    const r = raw as unknown as Row;
+    if (r.render_asset_id) assetIds.add(r.render_asset_id);
+    if (r.edl?.poster_asset_id) assetIds.add(r.edl.poster_asset_id);
+  }
   const paths: Record<string, string> = {};
-  if (assetIds.length) {
+  if (assetIds.size) {
     const { data: assets } = await supabase
       .from("media_assets")
       .select("id, storage_path")
-      .in("id", assetIds);
+      .in("id", Array.from(assetIds));
     for (const a of assets ?? []) paths[a.id] = a.storage_path;
   }
-  const urls: Record<string, string> = {};
-  await Promise.all(
-    Object.entries(paths).map(async ([id, path]) => {
-      const { data } = await supabase.storage
-        .from("raw")
-        .createSignedUrl(path, 3600);
-      if (data?.signedUrl) urls[id] = data.signedUrl;
+
+  const sign = async (path: string, download = false) => {
+    const { data } = await supabase.storage
+      .from("raw")
+      .createSignedUrl(path, 3600, download ? { download: true } : undefined);
+    return data?.signedUrl ?? "";
+  };
+
+  return Promise.all(
+    rows.map(async (raw) => {
+      const r = raw as unknown as Row;
+      const renderPath = r.render_asset_id ? paths[r.render_asset_id] : "";
+      const posterPath = r.edl?.poster_asset_id
+        ? paths[r.edl.poster_asset_id]
+        : "";
+      const isVideo = renderPath.endsWith(".mp4");
+
+      const videoUrl = isVideo ? await sign(renderPath) : null;
+      const downloadUrl = isVideo ? await sign(renderPath, true) : null;
+      const img = posterPath
+        ? await sign(posterPath)
+        : !isVideo && renderPath
+        ? await sign(renderPath)
+        : "";
+
+      const cutLen = Math.max(0, (r.edl?.out ?? 0) - (r.edl?.in ?? 0));
+      const slot = r.suggested_slot || "This week";
+      const day = DAY_INDEX[slot.slice(0, 3).toLowerCase()] ?? 0;
+      const words = (r.edl?.captions ?? [])
+        .map((c) => c.text)
+        .filter(Boolean)
+        .slice(0, 6);
+
+      return {
+        id: r.id,
+        kind: (r.format === "story" ? "Story" : "Reel") as Piece["kind"],
+        type: TYPE_LABEL[r.edl?.type ?? ""] ?? "Teaching",
+        img,
+        videoUrl,
+        downloadUrl,
+        dur: `${Math.floor(cutLen / 60)}:${String(Math.round(cutLen % 60)).padStart(2, "0")}`,
+        platforms: r.format === "story" ? ["IG Story"] : ["Reels", "TikTok"],
+        slot,
+        day,
+        words: words.length ? words : [r.hook ?? "—"],
+        hook: r.hook ?? "",
+        caption: r.caption ?? "",
+        tags: r.hashtags ?? "",
+        cta: r.cta ?? "",
+        why: r.why ?? "",
+        status: r.status as Piece["status"],
+        skipReason: r.skip_reason,
+      };
     })
   );
-
-  return rows.map((raw) => {
-    const r = raw as unknown as Row;
-    const cutLen = Math.max(0, (r.edl?.out ?? 0) - (r.edl?.in ?? 0));
-    const slot = r.suggested_slot || "This week";
-    const day = DAY_INDEX[slot.slice(0, 3).toLowerCase()] ?? 0;
-    const words = (r.edl?.captions ?? [])
-      .map((c) => c.text)
-      .filter(Boolean)
-      .slice(0, 6);
-    return {
-      id: r.id,
-      kind: r.format === "story" ? "Story" : "Reel",
-      type: TYPE_LABEL[r.edl?.type ?? ""] ?? "Teaching",
-      img: r.render_asset_id ? urls[r.render_asset_id] ?? "" : "",
-      dur: `${Math.floor(cutLen / 60)}:${String(Math.round(cutLen % 60)).padStart(2, "0")}`,
-      platforms: r.format === "story" ? ["IG Story"] : ["Reels", "TikTok"],
-      slot,
-      day,
-      words: words.length ? words : [r.hook ?? "—"],
-      hook: r.hook ?? "",
-      caption: r.caption ?? "",
-      tags: r.hashtags ?? "",
-      cta: r.cta ?? "",
-      why: r.why ?? "",
-      status: r.status as Piece["status"],
-      skipReason: r.skip_reason,
-    };
-  });
 }

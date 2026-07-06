@@ -17,6 +17,7 @@ import {
   extractAudioWav,
   sampleFrames,
   posterFrame,
+  ffmpegRun,
 } from "./ffmpeg.js";
 import { askClaude, imageBlock, extractJson } from "./claude.js";
 
@@ -342,8 +343,10 @@ export async function compose({ session }) {
           start_x_frac: Number(piece.edl?.crop?.start_x_frac ?? 0.35),
         },
         captions,
+        poster_asset_id: posterAsset.id,
       },
-      render_asset_id: posterAsset.id,
+      render_asset_id: posterAsset.id, // replaced by the video in the render stage
+
       hook: String(piece.hook ?? "").slice(0, 200),
       caption: String(piece.caption ?? "").slice(0, 2000),
       hashtags: String(piece.hashtags ?? "").slice(0, 300),
@@ -351,12 +354,164 @@ export async function compose({ session }) {
       why: String(piece.why ?? "").slice(0, 500),
       suggested_slot: String(piece.suggested_slot ?? "").slice(0, 40),
       suggested_sound: String(piece.suggested_sound ?? "").slice(0, 120),
-      status: "ready",
+      status: "rendering",
     });
     if (insErr) throw new Error(`insert piece: ${insErr.message}`);
   }
 
-  return null; // pipeline complete for Phase 4 — session becomes ready
+  return "render";
 }
 
-export const STAGES = { ingest, transcribe, understand, compose };
+/* ——— Stage 5: render each EDL deterministically (SPEC recipe) ——— */
+const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+
+function buildVideoFilter({ piece, srcW, srcH, accentHex, dir, writeFileSync }) {
+  const edl = piece.edl;
+  const dur = edl.out - edl.in;
+  const parts = [];
+
+  if (srcW > srcH) {
+    // Landscape → crop to 9:16 (generalized from the SPEC's 1920x1080 recipe)
+    const cw = Math.floor((srcH * 9) / 16 / 2) * 2;
+    const center = Math.round((srcW - cw) / 2);
+    const rawStart = Math.round((edl.crop?.start_x_frac ?? 0.35) * srcW - cw / 2);
+    const startX = Math.max(0, Math.min(rawStart, srcW - cw));
+    const xExpr =
+      edl.crop?.mode === "eased" && startX !== center
+        ? `'if(lt(t,3),${startX}+(${center}-${startX})*t/3,${center})'`
+        : String(center);
+    parts.push(`crop=${cw}:${srcH}:${xExpr}:0`, "scale=1080:1920");
+  } else {
+    // Vertical → cover-fit to 1080x1920
+    parts.push(
+      "scale=1080:1920:force_original_aspect_ratio=increase",
+      "crop=1080:1920"
+    );
+  }
+
+  parts.push("fps=30", "format=yuv420p");
+  parts.push(
+    "fade=t=in:st=0:d=0.35",
+    `fade=t=out:st=${Math.max(0, dur - 0.35).toFixed(2)}:d=0.35`
+  );
+
+  const accent = "0x" + (accentHex || "#C8102E").replace("#", "");
+  (edl.captions ?? []).forEach((c, i) => {
+    const txt = join(dir, `cap${i}.txt`);
+    writeFileSync(txt, c.text); // SPEC: text via files to avoid escaping bugs
+    const common = `fontfile=${FONT}:textfile=${txt}:x=(w-text_w)/2:enable='between(t,${c.t0},${c.t1})'`;
+    if (c.style === "hook") {
+      parts.push(
+        `drawtext=${common}:fontcolor=white:fontsize=58:box=1:boxcolor=${accent}:boxborderw=22:y=1440`
+      );
+    } else {
+      parts.push(
+        `drawtext=${common}:fontcolor=white:fontsize=48:borderw=6:bordercolor=black@0.55:y=1470`
+      );
+    }
+  });
+
+  return parts.join(",");
+}
+
+export async function render({ session }) {
+  const { writeFileSync } = await import("node:fs");
+  const coach = await loadCoach(session);
+  const assets = await loadAssets(session.id);
+  const byId = Object.fromEntries(assets.map((a) => [a.id, a]));
+
+  const { data: pieces, error } = await db
+    .from("content_pieces")
+    .select("*")
+    .eq("session_id", session.id)
+    .in("status", ["rendering", "ready", "approved", "downloaded"]);
+  if (error) throw new Error(`load pieces: ${error.message}`);
+
+  const { data: renderAssets } = await db
+    .from("media_assets")
+    .select("id, storage_path")
+    .eq("session_id", session.id)
+    .eq("kind", "render");
+  const assetPath = Object.fromEntries(
+    (renderAssets ?? []).map((a) => [a.id, a.storage_path])
+  );
+
+  for (const piece of pieces ?? []) {
+    const edl = piece.edl;
+    const src = edl?.asset_id ? byId[edl.asset_id] : null;
+    if (!src || !Number.isFinite(edl.in) || !Number.isFinite(edl.out)) continue;
+    // Already has a rendered video? Skip (makes re-render jobs idempotent).
+    if (piece.render_asset_id && assetPath[piece.render_asset_id]?.endsWith(".mp4"))
+      continue;
+
+    await withTmp(async (dir) => {
+      const local = await downloadTo(src.storage_path, join(dir, "src.mp4"));
+      const info = await probe(local);
+      const dur = edl.out - edl.in;
+      const vf = buildVideoFilter({
+        piece,
+        srcW: info.width ?? 1920,
+        srcH: info.height ?? 1080,
+        accentHex: coach.accent_hex,
+        dir,
+        writeFileSync,
+      });
+
+      const out = join(dir, "out.mp4");
+      const args = [
+        "-y",
+        "-ss", String(edl.in),
+        "-t", String(dur),
+        "-i", local,
+        "-vf", vf,
+      ];
+      if (info.hasAudio) {
+        // SPEC: keep original audio, normalized
+        args.push("-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "128k");
+      } else {
+        args.push("-an");
+      }
+      args.push(
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "20",
+        "-r", "30",
+        "-movflags", "+faststart",
+        out
+      );
+      await ffmpegRun(args);
+
+      const folder = src.storage_path.split("/").slice(0, 2).join("/");
+      const storagePath = `${folder}/renders/${piece.id}.mp4`;
+      await uploadFrom(out, storagePath, "video/mp4");
+
+      const { data: videoAsset, error: vaErr } = await db
+        .from("media_assets")
+        .insert({
+          session_id: session.id,
+          storage_path: storagePath,
+          kind: "render",
+          duration_sec: dur,
+          width: 1080,
+          height: 1920,
+        })
+        .select("id")
+        .single();
+      if (vaErr) throw new Error(`render asset: ${vaErr.message}`);
+
+      const { error: upErr } = await db
+        .from("content_pieces")
+        .update({
+          render_asset_id: videoAsset.id,
+          status: piece.status === "rendering" ? "ready" : piece.status,
+        })
+        .eq("id", piece.id);
+      if (upErr) throw new Error(`update piece: ${upErr.message}`);
+      console.log(`  rendered piece ${piece.id}`);
+    });
+  }
+
+  return null; // pipeline complete — session becomes ready
+}
+
+export const STAGES = { ingest, transcribe, understand, compose, render };

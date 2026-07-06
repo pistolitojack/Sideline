@@ -52,6 +52,10 @@ export async function sampleFrames(localPath, duration, outDir, maxFrames = 30) 
   }));
 }
 
+export async function ffmpegRun(args) {
+  await run("ffmpeg", args);
+}
+
 export async function posterFrame(localPath, atSeconds, outPath) {
   await run("ffmpeg", [
     "-y",

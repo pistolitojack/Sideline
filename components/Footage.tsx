@@ -30,15 +30,29 @@ export default function Footage({
       className="relative w-full h-full overflow-hidden select-none"
       style={{ background: "#0D0C0A" }}
     >
-      {piece.img && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={piece.img}
-          alt=""
-          draggable={false}
+      {piece.videoUrl ? (
+        <video
+          src={piece.videoUrl}
+          poster={piece.img || undefined}
+          autoPlay={playing}
+          muted
+          loop
+          playsInline
+          preload="metadata"
           className="absolute inset-0 w-full h-full"
           style={{ objectFit: "cover" }}
         />
+      ) : (
+        piece.img && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={piece.img}
+            alt=""
+            draggable={false}
+            className="absolute inset-0 w-full h-full"
+            style={{ objectFit: "cover" }}
+          />
+        )
       )}
       <div
         className="absolute inset-x-0 bottom-0"
@@ -47,7 +61,7 @@ export default function Footage({
           background: "linear-gradient(to top, rgba(0,0,0,0.55), transparent)",
         }}
       />
-      {!small && (
+      {!small && !piece.videoUrl && (
         <div
           className="absolute inset-x-0 flex items-center justify-center px-4"
           style={{ bottom: "26%" }}

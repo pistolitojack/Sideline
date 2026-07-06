@@ -34,6 +34,7 @@ export default function Today({
   demo,
   hasVoiceMemo,
   initialActiveSession,
+  onDownloaded,
 }: {
   coach: Coach;
   coachId?: string;
@@ -45,6 +46,7 @@ export default function Today({
   demo: boolean;
   hasVoiceMemo: boolean;
   initialActiveSession: ActiveSession;
+  onDownloaded: (id: number | string) => void;
 }) {
   const router = useRouter();
   const [mSheet, setMSheet] = useState(false);
@@ -52,6 +54,8 @@ export default function Today({
   const [voiceDone, setVoiceDone] = useState(hasVoiceMemo);
   const [uploadNote, setUploadNote] = useState(false);
   const [activeSession, setActiveSession] = useState(initialActiveSession);
+  const [selPiece, setSelPiece] = useState<Piece | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const accent = coach.accentHex;
   const ready = pieces.filter((p) => p.status === "ready").length;
@@ -374,7 +378,22 @@ export default function Today({
         ) : (
           <div className="flex mt-3" style={{ gap: 10, overflowX: "auto" }}>
             {approved.map((p) => (
-              <div key={p.id} style={{ flexShrink: 0, width: 84 }}>
+              <button
+                key={p.id}
+                onClick={() => {
+                  setCopied(false);
+                  setSelPiece(p);
+                }}
+                className="sl-card-press"
+                style={{
+                  flexShrink: 0,
+                  width: 84,
+                  background: "none",
+                  border: "none",
+                  padding: 0,
+                  cursor: "pointer",
+                }}
+              >
                 <div
                   style={{
                     width: 84,
@@ -397,7 +416,7 @@ export default function Today({
                 >
                   {p.slot}
                 </p>
-              </div>
+              </button>
             ))}
           </div>
         )}
@@ -436,7 +455,134 @@ export default function Today({
         />
       )}
 
+{selPiece && (
+        <div
+          className="fixed inset-0 flex flex-col justify-end"
+          style={{ background: "rgba(0,0,0,0.5)", zIndex: 45 }}
+          onClick={() => setSelPiece(null)}
+        >
+          <div
+            className="sl-rise"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "rgba(255,255,255,0.96)",
+              backdropFilter: "blur(18px)",
+              borderRadius: "24px 24px 0 0",
+              padding: "18px 20px calc(28px + env(safe-area-inset-bottom))",
+              maxWidth: 430,
+              margin: "0 auto",
+              width: "100%",
+            }}
+          >
+            <div
+              style={{
+                width: 36,
+                height: 4,
+                borderRadius: 4,
+                background: BASE.faint,
+                margin: "0 auto 14px",
+              }}
+            />
+            <div className="flex" style={{ gap: 14 }}>
+              <div
+                style={{
+                  width: 96,
+                  height: 170,
+                  borderRadius: 14,
+                  overflow: "hidden",
+                  flexShrink: 0,
+                  boxShadow: "0 12px 26px -12px rgba(0,0,0,0.45)",
+                }}
+              >
+                <Footage piece={selPiece} small playing />
+              </div>
+              <div className="flex-1 flex flex-col" style={{ minWidth: 0 }}>
+                <p
+                  style={{
+                    fontSize: 15,
+                    fontWeight: 800,
+                    color: BASE.ink,
+                    lineHeight: 1.3,
+                  }}
+                >
+                  {selPiece.hook}
+                </p>
+                <p
+                  style={{
+                    fontSize: 12,
+                    color: BASE.muted,
+                    marginTop: 4,
+                    fontWeight: 600,
+                  }}
+                >
+                  {selPiece.slot} · {selPiece.platforms.join(" + ")}
+                </p>
+                <div className="flex-1" />
+                {selPiece.videoUrl ? (
+                  <a
+                    href={selPiece.downloadUrl || selPiece.videoUrl}
+                    download
+                    onClick={() => onDownloaded(selPiece.id)}
+                    style={{
+                      display: "block",
+                      textAlign: "center",
+                      borderRadius: 14,
+                      background: accent,
+                      color: "#fff",
+                      fontSize: 14,
+                      fontWeight: 700,
+                      padding: "13px 0",
+                      textDecoration: "none",
+                    }}
+                  >
+                    Download video
+                  </a>
+                ) : (
+                  <p
+                    style={{
+                      fontSize: 12.5,
+                      color: BASE.muted,
+                      lineHeight: 1.45,
+                    }}
+                  >
+                    {demo
+                      ? "Demo piece — downloads work on your real content."
+                      : "Video still rendering — check back in a minute."}
+                  </p>
+                )}
+                <button
+                  onClick={() => {
+                    const text = [selPiece.caption, selPiece.cta, selPiece.tags]
+                      .filter(Boolean)
+                      .join("\n\n");
+                    navigator.clipboard.writeText(text).then(
+                      () => setCopied(true),
+                      () => setCopied(false)
+                    );
+                  }}
+                  style={{
+                    borderRadius: 14,
+                    background: BASE.paper,
+                    border: `1px solid ${BASE.faint}`,
+                    color: BASE.ink,
+                    fontSize: 14,
+                    fontWeight: 700,
+                    padding: "12px 0",
+                    marginTop: 8,
+                    cursor: "pointer",
+                    width: "100%",
+                  }}
+                >
+                  {copied ? "Copied ✓" : "Copy caption"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {mSheet && (
+
         <div
           className="fixed inset-0 flex flex-col justify-end"
           style={{ background: "rgba(0,0,0,0.4)", zIndex: 40 }}
