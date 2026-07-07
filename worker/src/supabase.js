@@ -1,5 +1,8 @@
 import { createClient } from "@supabase/supabase-js";
-import { writeFile, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -20,7 +23,8 @@ const BUCKET = "raw";
 export async function downloadTo(storagePath, localPath) {
   const { data, error } = await db.storage.from(BUCKET).download(storagePath);
   if (error) throw new Error(`download ${storagePath}: ${error.message}`);
-  await writeFile(localPath, Buffer.from(await data.arrayBuffer()));
+  // Stream to disk — big source videos must never sit in memory.
+  await pipeline(Readable.fromWeb(data.stream()), createWriteStream(localPath));
   return localPath;
 }
 
@@ -47,5 +51,5 @@ export async function uploadJson(obj, storagePath) {
 export async function downloadJson(storagePath) {
   const { data, error } = await db.storage.from(BUCKET).download(storagePath);
   if (error) throw new Error(`download ${storagePath}: ${error.message}`);
-  return JSON.parse(Buffer.from(await data.arrayBuffer()).toString("utf8"));
+  return JSON.parse(await data.text());
 }

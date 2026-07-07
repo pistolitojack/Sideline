@@ -12,13 +12,20 @@ async function ff(args) {
   try {
     await run("ffmpeg", [...QUIET, ...args], OPTS);
   } catch (e) {
-    const tail = String(e.stderr || e.message || e)
+    if (e.signal === "SIGKILL" || (!e.stderr && e.killed !== false && !e.code)) {
+      throw new Error(
+        "ffmpeg was killed by the machine (out of memory) — the worker needs a bigger instance or lighter settings"
+      );
+    }
+    const tail = String(e.stderr || "")
       .trim()
       .split("\n")
       .slice(-6)
       .join(" | ")
       .slice(-700);
-    throw new Error(`ffmpeg failed: ${tail || "no error output (likely killed for exceeding the machine's memory)"}`);
+    throw new Error(
+      `ffmpeg failed (exit ${e.code ?? "?"}${e.signal ? ", signal " + e.signal : ""}): ${tail || "no error output"}`
+    );
   }
 }
 

@@ -475,9 +475,9 @@ export async function render({ session }) {
       // fewer threads, no reference-frame/lookahead buildup.
       args.push(
         "-c:v", "libx264",
-        "-preset", "superfast",
-        "-x264-params", "ref=1:rc-lookahead=8",
-        "-threads", "2",
+        "-preset", "ultrafast",
+        "-x264-params", "ref=1:rc-lookahead=0",
+        "-threads", "1",
         "-crf", "20",
         "-r", "30",
         "-movflags", "+faststart",
