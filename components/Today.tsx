@@ -35,6 +35,7 @@ export default function Today({
   hasVoiceMemo,
   initialActiveSession,
   onDownloaded,
+  onDelete,
 }: {
   coach: Coach;
   coachId?: string;
@@ -47,6 +48,7 @@ export default function Today({
   hasVoiceMemo: boolean;
   initialActiveSession: ActiveSession;
   onDownloaded: (id: number | string) => void;
+  onDelete: (id: number | string) => void;
 }) {
   const router = useRouter();
   const [mSheet, setMSheet] = useState(false);
@@ -56,6 +58,7 @@ export default function Today({
   const [activeSession, setActiveSession] = useState(initialActiveSession);
   const [selPiece, setSelPiece] = useState<Piece | null>(null);
   const [copied, setCopied] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
 
   const accent = coach.accentHex;
   const ready = pieces.filter((p) => p.status === "ready").length;
@@ -382,6 +385,7 @@ export default function Today({
                 key={p.id}
                 onClick={() => {
                   setCopied(false);
+                  setConfirmDel(false);
                   setSelPiece(p);
                 }}
                 className="sl-card-press"
@@ -574,6 +578,30 @@ export default function Today({
                   }}
                 >
                   {copied ? "Copied ✓" : "Copy caption"}
+                </button>
+                <button
+                  onClick={() => {
+                    if (!confirmDel) {
+                      setConfirmDel(true);
+                      return;
+                    }
+                    onDelete(selPiece.id);
+                    setSelPiece(null);
+                  }}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    color: "#B3261E",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    marginTop: 12,
+                    width: "100%",
+                  }}
+                >
+                  {confirmDel
+                    ? "Tap again to delete forever"
+                    : "Delete this reel"}
                 </button>
               </div>
             </div>

@@ -87,6 +87,17 @@ export default function AppShell({
     }
   };
 
+  const removePiece = (id: number | string) => {
+    setPieces((ps) => ps.filter((p) => p.id !== id));
+    if (!demo && typeof id === "string" && hasSupabaseEnv()) {
+      createClient()
+        .from("content_pieces")
+        .delete()
+        .eq("id", id)
+        .then(undefined, () => {});
+    }
+  };
+
   const readyCount = pieces.filter((p) => p.status === "ready").length;
 
   return (
@@ -127,6 +138,7 @@ export default function AppShell({
           hasVoiceMemo={hasVoiceMemo}
           initialActiveSession={activeSession}
           onDownloaded={markDownloaded}
+          onDelete={removePiece}
         />
       )}
       {tab === "review" && (
