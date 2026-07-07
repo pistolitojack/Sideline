@@ -365,6 +365,23 @@ export async function compose({ session }) {
 /* ——— Stage 5: render each EDL deterministically (SPEC recipe) ——— */
 const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
+// drawtext has no auto-wrap: break captions into up to 3 fitted lines.
+function wrapText(text, maxChars) {
+  const words = String(text).trim().split(/\s+/);
+  const lines = [];
+  let line = "";
+  for (const w of words) {
+    if (line && (line + " " + w).length > maxChars) {
+      lines.push(line);
+      line = w;
+    } else {
+      line = line ? line + " " + w : w;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 3).join("\n");
+}
+
 function buildVideoFilter({ piece, srcW, srcH, accentHex, dir, writeFileSync }) {
   const edl = piece.edl;
   const dur = edl.out - edl.in;
@@ -398,15 +415,17 @@ function buildVideoFilter({ piece, srcW, srcH, accentHex, dir, writeFileSync }) 
   const accent = "0x" + (accentHex || "#C8102E").replace("#", "");
   (edl.captions ?? []).forEach((c, i) => {
     const txt = join(dir, `cap${i}.txt`);
-    writeFileSync(txt, c.text); // SPEC: text via files to avoid escaping bugs
-    const common = `fontfile=${FONT}:textfile=${txt}:x=(w-text_w)/2:enable='between(t,${c.t0},${c.t1})'`;
-    if (c.style === "hook") {
+    const hook = c.style === "hook";
+    // ~30px avg glyph width at fontsize 54 → 20 chars fits 1080 with margins
+    writeFileSync(txt, wrapText(c.text, hook ? 20 : 28)); // SPEC: text via files
+    const common = `fontfile=${FONT}:textfile=${txt}:x=(w-text_w)/2:line_spacing=10:enable='between(t,${c.t0},${c.t1})'`;
+    if (hook) {
       parts.push(
-        `drawtext=${common}:fontcolor=white:fontsize=58:box=1:boxcolor=${accent}:boxborderw=22:y=1440`
+        `drawtext=${common}:fontcolor=white:fontsize=54:box=1:boxcolor=${accent}:boxborderw=20:y=1380`
       );
     } else {
       parts.push(
-        `drawtext=${common}:fontcolor=white:fontsize=48:borderw=6:bordercolor=black@0.55:y=1470`
+        `drawtext=${common}:fontcolor=white:fontsize=42:borderw=6:bordercolor=black@0.55:y=1470`
       );
     }
   });
@@ -427,22 +446,12 @@ export async function render({ session }) {
     .in("status", ["rendering", "ready", "approved", "downloaded"]);
   if (error) throw new Error(`load pieces: ${error.message}`);
 
-  const { data: renderAssets } = await db
-    .from("media_assets")
-    .select("id, storage_path")
-    .eq("session_id", session.id)
-    .eq("kind", "render");
-  const assetPath = Object.fromEntries(
-    (renderAssets ?? []).map((a) => [a.id, a.storage_path])
-  );
-
   for (const piece of pieces ?? []) {
     const edl = piece.edl;
     const src = edl?.asset_id ? byId[edl.asset_id] : null;
     if (!src || !Number.isFinite(edl.in) || !Number.isFinite(edl.out)) continue;
-    // Already has a rendered video? Skip (makes re-render jobs idempotent).
-    if (piece.render_asset_id && assetPath[piece.render_asset_id]?.endsWith(".mp4"))
-      continue;
+    // Render jobs re-execute every EDL — re-running a job re-renders the
+    // session with the current recipe (output overwrites the same file).
 
     await withTmp(async (dir) => {
       const local = await downloadTo(src.storage_path, join(dir, "src.mp4"));

@@ -44,10 +44,19 @@ export async function probe(localPath) {
   const info = JSON.parse(stdout);
   const video = info.streams?.find((s) => s.codec_type === "video");
   const audio = info.streams?.find((s) => s.codec_type === "audio");
+  // Phones store portrait video as landscape + a rotation tag; ffmpeg
+  // auto-rotates frames on decode, so report the *displayed* dimensions.
+  const rot = Math.abs(
+    Number(
+      video?.side_data_list?.find((d) => d.rotation !== undefined)?.rotation ??
+        0
+    )
+  );
+  const swapped = rot % 180 === 90;
   return {
     duration: Number(info.format?.duration) || null,
-    width: video?.width ?? null,
-    height: video?.height ?? null,
+    width: (swapped ? video?.height : video?.width) ?? null,
+    height: (swapped ? video?.width : video?.height) ?? null,
     hasAudio: Boolean(audio),
   };
 }
