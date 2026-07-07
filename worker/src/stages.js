@@ -471,9 +471,13 @@ export async function render({ session }) {
       } else {
         args.push("-an");
       }
+      // Tuned to fit small worker machines (Railway trial has ~512MB RAM):
+      // fewer threads, no reference-frame/lookahead buildup.
       args.push(
         "-c:v", "libx264",
-        "-preset", "veryfast",
+        "-preset", "superfast",
+        "-x264-params", "ref=1:rc-lookahead=8",
+        "-threads", "2",
         "-crf", "20",
         "-r", "30",
         "-movflags", "+faststart",

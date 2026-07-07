@@ -2,15 +2,38 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
+const OPTS = { maxBuffer: 32 * 1024 * 1024 };
+
+// Quiet, non-interactive ffmpeg: only real errors reach the logs, and a
+// failure surfaces as one short message instead of the whole transcript.
+const QUIET = ["-nostdin", "-hide_banner", "-loglevel", "error"];
+
+async function ff(args) {
+  try {
+    await run("ffmpeg", [...QUIET, ...args], OPTS);
+  } catch (e) {
+    const tail = String(e.stderr || e.message || e)
+      .trim()
+      .split("\n")
+      .slice(-6)
+      .join(" | ")
+      .slice(-700);
+    throw new Error(`ffmpeg failed: ${tail || "no error output (likely killed for exceeding the machine's memory)"}`);
+  }
+}
 
 export async function probe(localPath) {
-  const { stdout } = await run("ffprobe", [
-    "-v", "error",
-    "-print_format", "json",
-    "-show_format",
-    "-show_streams",
-    localPath,
-  ]);
+  const { stdout } = await run(
+    "ffprobe",
+    [
+      "-v", "error",
+      "-print_format", "json",
+      "-show_format",
+      "-show_streams",
+      localPath,
+    ],
+    OPTS
+  );
   const info = JSON.parse(stdout);
   const video = info.streams?.find((s) => s.codec_type === "video");
   const audio = info.streams?.find((s) => s.codec_type === "audio");
@@ -23,7 +46,7 @@ export async function probe(localPath) {
 }
 
 export async function extractAudioWav(localPath, outPath) {
-  await run("ffmpeg", [
+  await ff([
     "-y", "-i", localPath,
     "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
     outPath,
@@ -35,7 +58,7 @@ export async function extractAudioWav(localPath, outPath) {
 // Returns [{ path, t }] with the timestamp each frame represents.
 export async function sampleFrames(localPath, duration, outDir, maxFrames = 30) {
   const interval = Math.max(2, (duration || 60) / maxFrames);
-  await run("ffmpeg", [
+  await ff([
     "-y", "-i", localPath,
     "-vf", `fps=1/${interval},scale=512:-2`,
     "-q:v", "6",
@@ -53,11 +76,11 @@ export async function sampleFrames(localPath, duration, outDir, maxFrames = 30) 
 }
 
 export async function ffmpegRun(args) {
-  await run("ffmpeg", args);
+  await ff(args);
 }
 
 export async function posterFrame(localPath, atSeconds, outPath) {
-  await run("ffmpeg", [
+  await ff([
     "-y",
     "-ss", String(Math.max(0, atSeconds)),
     "-i", localPath,
