@@ -148,7 +148,7 @@ export async function understand({ session }) {
 
     const moments = await withTmp(async (dir) => {
       const local = await downloadTo(asset.storage_path, join(dir, "in.mp4"));
-      const frames = await sampleFrames(local, asset.duration_sec, dir);
+      const frames = await sampleFrames(local, asset.duration_sec, dir, 40);
       const content = [];
       for (const f of frames) {
         content.push({ type: "text", text: `Frame at t=${f.t}s:` });
@@ -167,8 +167,18 @@ export async function understand({ session }) {
           words || "(no speech detected)",
           ``,
           `Find the 2-5 strongest moments for short-form social content.`,
-          `Moments must be 4-30 seconds long, within the video's duration,`,
-          `and each one a complete beat (a full cue, a full rep, a full thought).`,
+          `HARD RULES:`,
+          `- Every moment is a COMPLETE arc: setup, action, OUTCOME. Never end`,
+          `  before the payoff — if someone shoots, scores, finishes a rep,`,
+          `  lands a combo, or a drill resolves, the outcome AND about 2 seconds`,
+          `  of reaction after it belong INSIDE the moment. A clip that cuts`,
+          `  before the ball lands is worthless.`,
+          `- Frames are ~1.5-2s apart, so if action is building in the last`,
+          `  frame you can see, extend t_end past it rather than guessing short.`,
+          `- Mix lengths: short highlights (6-15s) AND longer teaching/story`,
+          `  segments (20-45s) when the footage supports them. Do not return`,
+          `  only sub-10s clips.`,
+          `- 4-45 seconds each, within the video's duration.`,
           `Return ONLY a JSON array, no other text:`,
           `[{"t_start": 7.5, "t_end": 20.8, "type": "teaching|hype|transformation|story|funny|technique",`,
           `  "score": 0.0-1.0, "reason": "one sentence", "hook_idea": "short hook"}]`,
@@ -194,10 +204,11 @@ export async function understand({ session }) {
       .map((m) => ({
         session_id: session.id,
         asset_id: asset.id,
-        t_start: Math.max(0, m.t_start),
+        // Pad both ends: sampling is coarse, and reactions sell the moment.
+        t_start: Math.max(0, m.t_start - 0.75),
         t_end: asset.duration_sec
-          ? Math.min(m.t_end, asset.duration_sec)
-          : m.t_end,
+          ? Math.min(m.t_end + 2, asset.duration_sec)
+          : m.t_end + 2,
         type: m.type,
         score: Math.max(0, Math.min(1, Number(m.score) || 0)),
         reason: String(m.reason ?? "").slice(0, 500),
@@ -246,46 +257,69 @@ export async function compose({ session }) {
   }
   if (picked.length < 3) picked.push(...moments.filter((m) => !picked.includes(m)).slice(0, 3 - picked.length));
 
-  for (const moment of picked) {
-    const asset = byId[moment.asset_id];
-    if (!asset) continue;
-    const landscape = (asset.width ?? 0) > (asset.height ?? 0);
+  // One writing sitting for the whole pack: the model sees every moment at
+  // once, so it can vary hooks/angles instead of converging on one formula.
+  const momentBrief = picked
+    .map((m, i) => {
+      const a = byId[m.asset_id];
+      const landscape = (a?.width ?? 0) > (a?.height ?? 0);
+      return `#${i} · type=${m.type} · ${m.t_start.toFixed(1)}s → ${m.t_end.toFixed(1)}s (${(
+        m.t_end - m.t_start
+      ).toFixed(1)}s available) · ${landscape ? "landscape" : "vertical"} source · reason: ${m.reason} · said: "${(m.transcript_span || "(no speech)").slice(0, 300)}"`;
+    })
+    .join("\n");
 
-    const prompt = [
-      `You are the coach's content writer. Coach profile:`,
-      `name=${coach.name}; sport=${coach.sport}; tones=${(coach.tones ?? []).join(", ")};`,
-      `audience=${coach.audience}; mission=${coach.mission}.`,
-      coach.voice_memo_transcript
-        ? `How the coach actually talks (voice memo transcript): "${coach.voice_memo_transcript.slice(0, 1200)}"`
-        : `(No voice memo — write plain, direct, no corporate tone.)`,
-      ``,
-      `The chosen moment: type=${moment.type}; ${moment.t_start}s → ${moment.t_end}s;`,
-      `reason: ${moment.reason}`,
-      `What is said during it: "${moment.transcript_span || "(no speech)"}"`,
-      `Source video is ${landscape ? "landscape (will be cropped to 9:16)" : "vertical"}.`,
-      ``,
-      `Create one finished piece. Max reel length 60s, story 15s. Caption beats`,
-      `must land inside the cut (times are relative to the cut start, 0 = cut start).`,
-      `Return ONLY this JSON object, no other text:`,
-      `{"format": "reel|story",`,
-      ` "edl": {"asset_id": "${asset.id}", "in": ${moment.t_start}, "out": ${moment.t_end},`,
-      `   "type": "${moment.type}",`,
-      `   "crop": {"mode": "center|eased", "start_x_frac": 0.35},`,
-      `   "captions": [{"text": "SHORT PUNCHY HOOK.", "t0": 0, "t1": 2.4, "style": "hook"},`,
-      `                {"text": "supporting beat", "t0": 2.4, "t1": 5.0, "style": "body"}]},`,
-      ` "hook": "...", "caption": "2-4 sentences in the coach's voice",`,
-      ` "hashtags": "#four #to #six #tags", "cta": "aimed at the coach's mission",`,
-      ` "why": "one sentence explaining this choice to the coach",`,
-      ` "suggested_slot": "Tue 6:00 PM",`,
-      ` "suggested_sound": "a style of trending sound, never a specific copyrighted song"}`,
-    ].join("\n");
+  const prompt = [
+    `You are the coach's content writer. Coach profile:`,
+    `name=${coach.name}; sport=${coach.sport}; tones=${(coach.tones ?? []).join(", ")};`,
+    `audience=${coach.audience}; mission=${coach.mission}.`,
+    coach.voice_memo_transcript
+      ? `How the coach actually talks (voice memo transcript): "${coach.voice_memo_transcript.slice(0, 1200)}"`
+      : `(No voice memo — write plain, direct, no corporate tone.)`,
+    ``,
+    `Today's moments — create one finished piece per moment (${picked.length} total):`,
+    momentBrief,
+    ``,
+    `VARIETY RULES — these make or break the coach's page:`,
+    `- Every hook uses a DIFFERENT structure. Rotate: bold claim, question,`,
+    `  contrarian take, direct callout to the viewer, mini-story opener, number/stat.`,
+    `- Never reuse a sentence pattern across pieces. Formulas like "X isn't born" or`,
+    `  "X is a skill" may appear at most ONCE in the whole set.`,
+    `- Vary the caption angle across pieces: teach one, celebrate one, tell the`,
+    `  story behind one, challenge the viewer in another.`,
+    `- Respect each moment's full length — a 30s teaching moment stays ~30s. Do NOT`,
+    `  trim everything to sub-10s clips; the set should mix short and long.`,
+    `  Story format max 15s; reels up to 60s.`,
+    `- Caption beats land inside the cut (t=0 = cut start): hook beat in the first`,
+    `  2-3 seconds, then 1-3 body beats spread through the cut.`,
+    ``,
+    `Return ONLY a JSON array, one object per moment:`,
+    `[{"moment_index": 0, "format": "reel|story",`,
+    `  "edl": {"in": <cut start s>, "out": <cut end s>,`,
+    `    "crop": {"mode": "center|eased", "start_x_frac": 0.35},`,
+    `    "captions": [{"text": "HOOK.", "t0": 0, "t1": 2.4, "style": "hook"},`,
+    `                 {"text": "body beat", "t0": 2.4, "t1": 5.0, "style": "body"}]},`,
+    `  "hook": "...", "caption": "1-4 sentences in the coach's voice",`,
+    `  "hashtags": "#four #to #six #tags", "cta": "aimed at the coach's mission",`,
+    `  "why": "one sentence explaining this choice to the coach",`,
+    `  "suggested_slot": "Tue 6:00 PM",`,
+    `  "suggested_sound": "a style of trending sound, never a specific song"}]`,
+  ].join("\n");
 
-    const reply = await askClaude({
-      system:
-        "You write short-form sports content in the coach's own voice. You only ever reply with valid JSON.",
-      content: [{ type: "text", text: prompt }],
-    });
-    const piece = extractJson(reply);
+  const reply = await askClaude({
+    system:
+      "You write short-form sports content in the coach's own voice. Every piece must feel different from the others. You only ever reply with valid JSON.",
+    content: [{ type: "text", text: prompt }],
+    maxTokens: 8000,
+  });
+  const drafts = extractJson(reply);
+  if (!Array.isArray(drafts) || !drafts.length)
+    throw new Error("compose returned no pieces");
+
+  for (const piece of drafts) {
+    const moment = picked[Number(piece.moment_index)];
+    const asset = moment ? byId[moment.asset_id] : null;
+    if (!moment || !asset) continue;
 
     // Clamp the cut and caption beats to sane bounds.
     const maxLen = piece.format === "story" ? 15 : 60;
@@ -296,6 +330,7 @@ export async function compose({ session }) {
     );
     if (asset.duration_sec) cutOut = Math.min(cutOut, asset.duration_sec);
     const cutLen = cutOut - cutIn;
+    if (!(cutLen > 1)) continue;
     const captions = (piece.edl?.captions ?? [])
       .filter((c) => c.text)
       .map((c) => ({
@@ -307,7 +342,6 @@ export async function compose({ session }) {
       .filter((c) => c.t1 > c.t0);
 
     // Poster frame from the middle of the cut → media_assets(kind render).
-    // Phase 5 replaces this with the real rendered video.
     const folder = asset.storage_path.split("/").slice(0, 2).join("/");
     const posterStorage = `${folder}/posters/${moment.id}.jpg`;
     await withTmp(async (dir) => {
@@ -346,7 +380,6 @@ export async function compose({ session }) {
         poster_asset_id: posterAsset.id,
       },
       render_asset_id: posterAsset.id, // replaced by the video in the render stage
-
       hook: String(piece.hook ?? "").slice(0, 200),
       caption: String(piece.caption ?? "").slice(0, 2000),
       hashtags: String(piece.hashtags ?? "").slice(0, 300),

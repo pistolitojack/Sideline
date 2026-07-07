@@ -73,7 +73,7 @@ export async function extractAudioWav(localPath, outPath) {
 // Sample frames ~1 per 2s, capped at maxFrames, resized to 512px wide.
 // Returns [{ path, t }] with the timestamp each frame represents.
 export async function sampleFrames(localPath, duration, outDir, maxFrames = 30) {
-  const interval = Math.max(2, (duration || 60) / maxFrames);
+  const interval = Math.max(1.5, (duration || 60) / maxFrames);
   await ff([
     "-y", "-i", localPath,
     "-vf", `fps=1/${interval},scale=512:-2`,
