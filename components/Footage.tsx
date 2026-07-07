@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { TYPE_COLORS } from "@/lib/design";
 import type { Piece } from "@/lib/types";
 
@@ -16,6 +16,8 @@ export default function Footage({
   small?: boolean;
 }) {
   const [wi, setWi] = useState(0);
+  const [muted, setMuted] = useState(true);
+  const videoRef = useRef<HTMLVideoElement>(null);
   useEffect(() => {
     if (!playing) return;
     const t = setInterval(
@@ -32,10 +34,11 @@ export default function Footage({
     >
       {piece.videoUrl ? (
         <video
+          ref={videoRef}
           src={piece.videoUrl}
           poster={piece.img || undefined}
           autoPlay={playing}
-          muted
+          muted={muted}
           loop
           playsInline
           preload="metadata"
@@ -100,6 +103,41 @@ export default function Footage({
           {small ? piece.kind : piece.type}
         </span>
       </div>
+      {!small && piece.videoUrl && (
+        <button
+          aria-label={muted ? "Unmute" : "Mute"}
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            setMuted((m) => {
+              const v = videoRef.current;
+              if (v) {
+                v.muted = !m ? true : false;
+                if (m) v.play().catch(() => {});
+              }
+              return !m;
+            });
+          }}
+          className="absolute"
+          style={{
+            bottom: "20%",
+            right: 12,
+            width: 40,
+            height: 40,
+            borderRadius: 999,
+            border: "1px solid rgba(255,255,255,0.35)",
+            background: "rgba(0,0,0,0.45)",
+            backdropFilter: "blur(6px)",
+            color: "#fff",
+            fontSize: 17,
+            cursor: "pointer",
+            zIndex: 5,
+          }}
+        >
+          {muted ? "🔇" : "🔊"}
+        </button>
+      )}
       <div className="absolute" style={{ top: small ? 6 : 12, right: small ? 6 : 12 }}>
         <span
           style={{
