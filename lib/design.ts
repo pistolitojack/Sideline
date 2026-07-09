@@ -23,6 +23,7 @@ export const ACCENTS: Accent[] = [
 ];
 
 export const TYPE_COLORS: Record<string, string> = {
+  Montage: "#0E7C4A",
   Teaching: "#C8102E",
   Hype: "#D97706",
   Story: "#8A4FBF",

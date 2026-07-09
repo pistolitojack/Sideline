@@ -162,6 +162,9 @@ export async function understand({ session }) {
         text: [
           `You are analyzing raw training footage for a sports coach.`,
           `Coach profile: sport=${coach.sport}; audience=${coach.audience}; mission=${coach.mission}.`,
+          session.brief
+            ? `THE COACH'S NOTE FOR THIS SESSION (top priority, honor it): "${String(session.brief).slice(0, 500)}"`
+            : ``,
           `Video duration: ${asset.duration_sec ?? "unknown"}s.`,
           `Transcript with word start-times in seconds:`,
           words || "(no speech detected)",
@@ -276,6 +279,9 @@ export async function compose({ session }) {
     coach.voice_memo_transcript
       ? `How the coach actually talks (voice memo transcript): "${coach.voice_memo_transcript.slice(0, 1200)}"`
       : `(No voice memo — write plain, direct, no corporate tone.)`,
+    session.brief
+      ? `THE COACH'S NOTE FOR THIS SESSION (top priority, honor it in every piece): "${String(session.brief).slice(0, 500)}"`
+      : ``,
     ``,
     `Today's moments — create one finished piece per moment (${picked.length} total):`,
     momentBrief,
@@ -392,10 +398,159 @@ export async function compose({ session }) {
     if (insErr) throw new Error(`insert piece: ${insErr.message}`);
   }
 
+  // ——— Mix-tape reel: one montage cut across ALL the session's videos ———
+  if (session.montage && moments.length >= 3) {
+    try {
+      await composeMontage({ session, coach, moments, byId });
+    } catch (e) {
+      // A failed montage never sinks the rest of the pack.
+      console.warn(`montage skipped: ${e.message}`);
+    }
+  }
+
   return "render";
 }
 
-/* ——— Stage 5: render each EDL deterministically (SPEC recipe) ——— */
+async function composeMontage({ session, coach, moments, byId }) {
+  const usable = moments.filter((m) => byId[m.asset_id]).slice(0, 14);
+  const clipList = usable
+    .map(
+      (m, i) =>
+        `#${i} · ${m.t_start.toFixed(1)}s → ${m.t_end.toFixed(1)}s · type=${m.type} · score=${m.score} · ${m.reason}`
+    )
+    .join("\n");
+
+  const prompt = [
+    `You are cutting ONE fast montage reel ("mix-tape") for a sports coach from`,
+    `today's best raw moments, which come from ${new Set(usable.map((m) => m.asset_id)).size} different videos.`,
+    `Coach: ${coach.name}; sport=${coach.sport}; mission=${coach.mission}.`,
+    session.brief
+      ? `THE COACH'S NOTE (honor it): "${String(session.brief).slice(0, 500)}"`
+      : ``,
+    ``,
+    `Available moments (pick sub-ranges from INSIDE them):`,
+    clipList,
+    ``,
+    `MONTAGE RULES:`,
+    `- 6-12 segments, each 1.5-4 seconds, total 20-40 seconds.`,
+    `- OPEN on the single most explosive payoff (a score, a landed rep, a`,
+    `  reaction) — earn the next 30 seconds in the first two.`,
+    `- Vary the energy: action, detail shots, coaching voice if any moment has`,
+    `  speech, and end on a strong beat (celebration or the coach).`,
+    `- Segments must come from at least 2 different moments; spread across`,
+    `  videos where possible.`,
+    `- Captions: one hook in the first 2s + 1-2 body beats. Times are relative`,
+    `  to the montage start (t=0).`,
+    ``,
+    `Return ONLY this JSON object:`,
+    `{"segments": [{"moment_index": 0, "in": <abs seconds>, "out": <abs seconds>}, ...],`,
+    ` "captions": [{"text": "HOOK.", "t0": 0, "t1": 2.2, "style": "hook"},`,
+    `              {"text": "body beat", "t0": 8, "t1": 11, "style": "body"}],`,
+    ` "hook": "...", "caption": "1-3 sentences in the coach's voice",`,
+    ` "hashtags": "#four #to #six #tags", "cta": "aimed at the mission",`,
+    ` "why": "one sentence for the coach",`,
+    ` "suggested_slot": "Sat 10:00 AM",`,
+    ` "suggested_sound": "a style of trending sound, never a specific song"}`,
+  ].join("\n");
+
+  const reply = await askClaude({
+    system:
+      "You are a short-form sports video editor with elite taste in pacing. You only ever reply with valid JSON.",
+    content: [{ type: "text", text: prompt }],
+    maxTokens: 4000,
+  });
+  const draft = extractJson(reply);
+
+  // Validate segments: inside their moment (with a little slack), 1-6s each,
+  // total capped at 60s.
+  let total = 0;
+  const segments = (draft.segments ?? [])
+    .map((seg) => {
+      const m = usable[Number(seg.moment_index)];
+      if (!m) return null;
+      const asset = byId[m.asset_id];
+      const lo = Math.max(0, m.t_start - 1);
+      const hi = Math.min(
+        m.t_end + 1,
+        asset.duration_sec ?? m.t_end + 1
+      );
+      const start = Math.max(lo, Math.min(Number(seg.in), hi - 1));
+      const end = Math.min(hi, Math.max(start + 1, Math.min(Number(seg.out), start + 6)));
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < 1)
+        return null;
+      return { asset_id: m.asset_id, in: start, out: end };
+    })
+    .filter(Boolean)
+    .filter((seg) => {
+      if (total >= 60) return false;
+      total += seg.out - seg.in;
+      return true;
+    });
+  if (segments.length < 3) throw new Error("montage returned too few usable segments");
+
+  const captions = (draft.captions ?? [])
+    .filter((c) => c.text)
+    .map((c) => ({
+      text: String(c.text).slice(0, 80),
+      t0: Math.max(0, Math.min(Number(c.t0) || 0, total)),
+      t1: Math.max(0, Math.min(Number(c.t1) || 0, total)),
+      style: c.style === "hook" ? "hook" : "body",
+    }))
+    .filter((c) => c.t1 > c.t0);
+
+  // Poster from the opening segment.
+  const first = segments[0];
+  const firstAsset = byId[first.asset_id];
+  const folder = firstAsset.storage_path.split("/").slice(0, 2).join("/");
+  const posterStorage = `${folder}/posters/montage-${session.id}.jpg`;
+  await withTmp(async (dir) => {
+    const local = await downloadTo(firstAsset.storage_path, join(dir, "in.mp4"));
+    const poster = await posterFrame(
+      local,
+      first.in + (first.out - first.in) / 2,
+      join(dir, "poster.jpg")
+    );
+    await uploadFrom(poster, posterStorage, "image/jpeg");
+  });
+  const { data: posterAsset, error: posterErr } = await db
+    .from("media_assets")
+    .insert({
+      session_id: session.id,
+      storage_path: posterStorage,
+      kind: "render",
+    })
+    .select("id")
+    .single();
+  if (posterErr) throw new Error(`montage poster: ${posterErr.message}`);
+
+  const { error: insErr } = await db.from("content_pieces").insert({
+    session_id: session.id,
+    format: "reel",
+    edl: {
+      segments,
+      type: "montage",
+      crop: { mode: "center", start_x_frac: 0.5 },
+      captions,
+      poster_asset_id: posterAsset.id,
+    },
+    render_asset_id: posterAsset.id,
+    hook: String(draft.hook ?? "").slice(0, 200),
+    caption: String(draft.caption ?? "").slice(0, 2000),
+    hashtags: String(draft.hashtags ?? "").slice(0, 300),
+    cta: String(draft.cta ?? "").slice(0, 300),
+    why: String(draft.why ?? "Best of the whole session in one cut.").slice(0, 500),
+    suggested_slot: String(draft.suggested_slot ?? "").slice(0, 40),
+    suggested_sound: String(draft.suggested_sound ?? "").slice(0, 120),
+    status: "rendering",
+  });
+  if (insErr) throw new Error(`insert montage: ${insErr.message}`);
+}
+
+/* ——— Stage 5: render each EDL deterministically (SPEC recipe) ———
+   Handles single cuts AND multi-video montages: every piece is a list of
+   segments (a single cut = one segment). Each segment is normalized to
+   1080x1920@30 with uniform audio, then one final pass concatenates them
+   and burns captions, fades, and loudness normalization. */
 const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
 // drawtext has no auto-wrap: break captions into up to 3 fitted lines.
@@ -415,42 +570,34 @@ function wrapText(text, maxChars) {
   return lines.slice(0, 3).join("\n");
 }
 
-function buildVideoFilter({ piece, srcW, srcH, accentHex, dir, writeFileSync }) {
-  const edl = piece.edl;
-  const dur = edl.out - edl.in;
-  const parts = [];
-
+// Crop/scale a source to 1080x1920 given its displayed dimensions.
+function geometryFilter(srcW, srcH, crop) {
   if (srcW > srcH) {
-    // Landscape → crop to 9:16 (generalized from the SPEC's 1920x1080 recipe)
     const cw = Math.floor((srcH * 9) / 16 / 2) * 2;
     const center = Math.round((srcW - cw) / 2);
-    const rawStart = Math.round((edl.crop?.start_x_frac ?? 0.35) * srcW - cw / 2);
+    const rawStart = Math.round((crop?.start_x_frac ?? 0.5) * srcW - cw / 2);
     const startX = Math.max(0, Math.min(rawStart, srcW - cw));
     const xExpr =
-      edl.crop?.mode === "eased" && startX !== center
+      crop?.mode === "eased" && startX !== center
         ? `'if(lt(t,3),${startX}+(${center}-${startX})*t/3,${center})'`
         : String(center);
-    parts.push(`crop=${cw}:${srcH}:${xExpr}:0`, "scale=1080:1920");
-  } else {
-    // Vertical → cover-fit to 1080x1920
-    parts.push(
-      "scale=1080:1920:force_original_aspect_ratio=increase",
-      "crop=1080:1920"
-    );
+    return `crop=${cw}:${srcH}:${xExpr}:0,scale=1080:1920`;
   }
+  return "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920";
+}
 
-  parts.push("fps=30", "format=yuv420p");
+// Captions + fades for the final pass over the assembled timeline.
+function overlayFilter({ edl, totalDur, accentHex, dir, writeFileSync }) {
+  const parts = ["format=yuv420p"];
   parts.push(
     "fade=t=in:st=0:d=0.35",
-    `fade=t=out:st=${Math.max(0, dur - 0.35).toFixed(2)}:d=0.35`
+    `fade=t=out:st=${Math.max(0, totalDur - 0.35).toFixed(2)}:d=0.35`
   );
-
   const accent = "0x" + (accentHex || "#C8102E").replace("#", "");
   (edl.captions ?? []).forEach((c, i) => {
     const txt = join(dir, `cap${i}.txt`);
     const hook = c.style === "hook";
-    // ~30px avg glyph width at fontsize 54 → 20 chars fits 1080 with margins
-    writeFileSync(txt, wrapText(c.text, hook ? 20 : 28)); // SPEC: text via files
+    writeFileSync(txt, wrapText(c.text, hook ? 20 : 28));
     const common = `fontfile=${FONT}:textfile=${txt}:x=(w-text_w)/2:line_spacing=10:enable='between(t,${c.t0},${c.t1})'`;
     if (hook) {
       parts.push(
@@ -462,9 +609,17 @@ function buildVideoFilter({ piece, srcW, srcH, accentHex, dir, writeFileSync }) 
       );
     }
   });
-
   return parts.join(",");
 }
+
+const ENC = [
+  "-c:v", "libx264",
+  "-preset", "ultrafast",
+  "-x264-params", "ref=1:rc-lookahead=0",
+  "-threads", "1",
+  "-crf", "20",
+  "-r", "30",
+];
 
 export async function render({ session }) {
   const { writeFileSync } = await import("node:fs");
@@ -481,53 +636,79 @@ export async function render({ session }) {
 
   for (const piece of pieces ?? []) {
     const edl = piece.edl;
-    const src = edl?.asset_id ? byId[edl.asset_id] : null;
-    if (!src || !Number.isFinite(edl.in) || !Number.isFinite(edl.out)) continue;
-    // Render jobs re-execute every EDL — re-running a job re-renders the
-    // session with the current recipe (output overwrites the same file).
+    if (!edl) continue;
+    // Normalize: a single cut is a one-segment montage.
+    const segments = (
+      edl.segments?.length
+        ? edl.segments
+        : [{ asset_id: edl.asset_id, in: edl.in, out: edl.out }]
+    ).filter(
+      (seg) =>
+        seg?.asset_id &&
+        byId[seg.asset_id] &&
+        Number.isFinite(seg.in) &&
+        Number.isFinite(seg.out) &&
+        seg.out > seg.in
+    );
+    if (!segments.length) continue;
 
     await withTmp(async (dir) => {
-      const local = await downloadTo(src.storage_path, join(dir, "src.mp4"));
-      const info = await probe(local);
-      const dur = edl.out - edl.in;
-      const vf = buildVideoFilter({
-        piece,
-        srcW: info.width ?? 1920,
-        srcH: info.height ?? 1080,
-        accentHex: coach.accent_hex,
-        dir,
-        writeFileSync,
-      });
-
-      const out = join(dir, "out.mp4");
-      const args = [
-        "-y",
-        "-ss", String(edl.in),
-        "-t", String(dur),
-        "-i", local,
-        "-vf", vf,
-      ];
-      if (info.hasAudio) {
-        // SPEC: keep original audio, normalized
-        args.push("-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "128k");
-      } else {
-        args.push("-an");
+      // Download each distinct source once.
+      const local = {};
+      const info = {};
+      for (const seg of segments) {
+        if (!local[seg.asset_id]) {
+          local[seg.asset_id] = await downloadTo(
+            byId[seg.asset_id].storage_path,
+            join(dir, `src-${seg.asset_id}.mp4`)
+          );
+          info[seg.asset_id] = await probe(local[seg.asset_id]);
+        }
       }
-      // Tuned to fit small worker machines (Railway trial has ~512MB RAM):
-      // fewer threads, no reference-frame/lookahead buildup.
-      args.push(
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-x264-params", "ref=1:rc-lookahead=0",
-        "-threads", "1",
-        "-crf", "20",
-        "-r", "30",
-        "-movflags", "+faststart",
-        out
-      );
-      await ffmpegRun(args);
 
-      const folder = src.storage_path.split("/").slice(0, 2).join("/");
+      // Pass 1: normalize every segment (uniform video + audio).
+      const segFiles = [];
+      for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        const inf = info[seg.asset_id];
+        const dur = seg.out - seg.in;
+        const out = join(dir, `seg${i}.mp4`);
+        const geo = geometryFilter(
+          inf.width ?? 1920,
+          inf.height ?? 1080,
+          seg.crop ?? edl.crop
+        );
+        const args = ["-y", "-ss", String(seg.in), "-t", String(dur), "-i", local[seg.asset_id]];
+        if (!inf.hasAudio) {
+          args.push("-f", "lavfi", "-t", String(dur), "-i", "anullsrc=r=48000:cl=stereo");
+          args.push("-map", "0:v:0", "-map", "1:a:0");
+        }
+        args.push("-vf", `${geo},fps=30,format=yuv420p`);
+        args.push("-ar", "48000", "-ac", "2", "-c:a", "aac", "-b:a", "128k");
+        args.push(...ENC, "-shortest", out);
+        await ffmpegRun(args);
+        segFiles.push(out);
+      }
+      const totalDur = segments.reduce((a, seg) => a + (seg.out - seg.in), 0);
+
+      // Pass 2: concat + captions + fades + loudnorm.
+      const listFile = join(dir, "list.txt");
+      writeFileSync(listFile, segFiles.map((f) => `file '${f}'`).join("\n"));
+      const out = join(dir, "out.mp4");
+      await ffmpegRun([
+        "-y", "-f", "concat", "-safe", "0", "-i", listFile,
+        "-vf", overlayFilter({ edl, totalDur, accentHex: coach.accent_hex, dir, writeFileSync }),
+        "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+        "-c:a", "aac", "-b:a", "128k",
+        ...ENC,
+        "-movflags", "+faststart",
+        out,
+      ]);
+
+      const folder = byId[segments[0].asset_id].storage_path
+        .split("/")
+        .slice(0, 2)
+        .join("/");
       const storagePath = `${folder}/renders/${piece.id}.mp4`;
       await uploadFrom(out, storagePath, "video/mp4");
 
@@ -537,7 +718,7 @@ export async function render({ session }) {
           session_id: session.id,
           storage_path: storagePath,
           kind: "render",
-          duration_sec: dur,
+          duration_sec: totalDur,
           width: 1080,
           height: 1920,
         })
@@ -553,7 +734,7 @@ export async function render({ session }) {
         })
         .eq("id", piece.id);
       if (upErr) throw new Error(`update piece: ${upErr.message}`);
-      console.log(`  rendered piece ${piece.id}`);
+      console.log(`  rendered piece ${piece.id} (${segments.length} segment${segments.length === 1 ? "" : "s"})`);
     });
   }
 

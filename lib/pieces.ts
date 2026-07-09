@@ -21,6 +21,7 @@ type Row = {
   edl: {
     in?: number;
     out?: number;
+    segments?: { in: number; out: number }[];
     type?: string;
     captions?: { text: string; style?: string }[];
     poster_asset_id?: string;
@@ -38,6 +39,7 @@ type Row = {
 };
 
 const TYPE_LABEL: Record<string, string> = {
+  montage: "Montage",
   teaching: "Teaching",
   hype: "Hype",
   transformation: "Transformation",
@@ -101,7 +103,9 @@ export async function loadPieces(
         ? await sign(renderPath)
         : "";
 
-      const cutLen = Math.max(0, (r.edl?.out ?? 0) - (r.edl?.in ?? 0));
+      const cutLen = r.edl?.segments?.length
+        ? r.edl.segments.reduce((a, seg) => a + Math.max(0, seg.out - seg.in), 0)
+        : Math.max(0, (r.edl?.out ?? 0) - (r.edl?.in ?? 0));
       const slot = r.suggested_slot || "This week";
       const day = DAY_INDEX[slot.slice(0, 3).toLowerCase()] ?? 0;
       const words = (r.edl?.captions ?? [])

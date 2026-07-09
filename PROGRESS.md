@@ -1,5 +1,19 @@
 # Sideline — Build Progress
 
+## V2 Creative Engine (part 1) ✅ built & montage pipeline test-rendered
+
+- **Mix-tape montage reels**: toggle on the upload screen — the AI cuts ONE
+  fast reel from segments across ALL uploaded videos (6-12 segments of
+  1.5-4s, opens on the biggest payoff, 20-40s total). Renderer now supports
+  multi-segment EDLs: per-segment normalize → concat → captions/fades/
+  loudnorm. Verified locally with mixed-orientation + silent sources.
+- **"Tell your employee" brief**: optional note at upload ("focus on the girl
+  in blue", "championship day") honored by moment-finding, writing, and the
+  montage cut. Stored on the session.
+- Montage pieces get a green Montage badge; duration sums segments.
+- Requires one-time SQL: `supabase/v2-creative.sql` (adds sessions.brief +
+  sessions.montage).
+
 ## Phase 5 — Rendering + playback + download ✅ built & recipe test-rendered
 
 - Worker gained a **render** stage (after compose): executes each EDL with

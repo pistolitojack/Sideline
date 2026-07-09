@@ -22,6 +22,8 @@ export default function UploadPage() {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [items, setItems] = useState<Item[]>([]);
+  const [montage, setMontage] = useState(false);
+  const [brief, setBrief] = useState("");
   const [phase, setPhase] = useState<"pick" | "uploading" | "queued" | "failed">(
     "pick"
   );
@@ -64,9 +66,15 @@ export default function UploadPage() {
         .single();
       if (coachErr || !coach) throw new Error("profile");
 
+      const sessionRow: Record<string, unknown> = {
+        coach_id: coach.id,
+        status: "uploading",
+      };
+      if (montage) sessionRow.montage = true;
+      if (brief.trim()) sessionRow.brief = brief.trim().slice(0, 500);
       const { data: sess, error: sessErr } = await supabase
         .from("sessions")
-        .insert({ coach_id: coach.id, status: "uploading" })
+        .insert(sessionRow)
         .select("id")
         .single();
       if (sessErr || !sess) throw new Error("session");
@@ -316,6 +324,83 @@ export default function UploadPage() {
               </div>
             ))}
           </div>
+
+          <button
+            onClick={() => setMontage((m) => !m)}
+            className="w-full mt-3 flex items-center sl-card-press"
+            style={{
+              border: montage
+                ? `1.5px solid var(--accent)`
+                : `1px solid ${BASE.faint}`,
+              background: montage
+                ? "color-mix(in srgb, var(--accent) 7%, #fff)"
+                : BASE.card,
+              borderRadius: 16,
+              padding: "13px 16px",
+              cursor: "pointer",
+              gap: 10,
+              textAlign: "left",
+            }}
+          >
+            <span
+              style={{
+                width: 22,
+                height: 22,
+                borderRadius: 7,
+                flexShrink: 0,
+                border: montage ? "none" : `1.5px solid ${BASE.faint}`,
+                background: montage ? "var(--accent)" : BASE.paper,
+                color: "#fff",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 13,
+                fontWeight: 800,
+              }}
+            >
+              {montage ? "✓" : ""}
+            </span>
+            <span>
+              <span
+                style={{
+                  fontSize: 13.5,
+                  fontWeight: 700,
+                  color: BASE.ink,
+                  display: "block",
+                }}
+              >
+                Mix-tape reel
+              </span>
+              <span
+                style={{ fontSize: 12, color: BASE.muted, display: "block" }}
+              >
+                Also cut one fast montage using ALL of these videos
+              </span>
+            </span>
+          </button>
+
+          <textarea
+            value={brief}
+            onChange={(e) => setBrief(e.target.value.slice(0, 500))}
+            rows={2}
+            placeholder={
+              "Tell your employee anything (optional): \u201cfocus on the girl in blue\u201d, \u201cmake it funny\u201d, \u201cchampionship day\u201d\u2026"
+            }
+            style={{
+              fontSize: 13.5,
+              fontWeight: 500,
+              color: BASE.ink,
+              background: BASE.card,
+              border: `1px solid ${BASE.faint}`,
+              borderRadius: 16,
+              padding: "12px 16px",
+              width: "100%",
+              marginTop: 10,
+              outline: "none",
+              resize: "none",
+              fontFamily: "inherit",
+            }}
+          />
 
           {phase === "failed" && (
             <p
