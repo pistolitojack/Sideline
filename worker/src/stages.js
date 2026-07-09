@@ -612,12 +612,22 @@ function overlayFilter({ edl, totalDur, accentHex, dir, writeFileSync }) {
   return parts.join(",");
 }
 
-const ENC = [
+// Intermediate segments stay local — speed over size.
+const ENC_SEG = [
   "-c:v", "libx264",
   "-preset", "ultrafast",
-  "-x264-params", "ref=1:rc-lookahead=0",
-  "-threads", "1",
-  "-crf", "20",
+  "-crf", "18",
+  "-r", "30",
+];
+// Final output gets uploaded — compress properly and cap the bitrate so a
+// 60s reel can never exceed the storage tier's 50MB per-file limit.
+const ENC_FINAL = [
+  "-c:v", "libx264",
+  "-preset", "veryfast",
+  "-threads", "2",
+  "-crf", "21",
+  "-maxrate", "6M",
+  "-bufsize", "12M",
   "-r", "30",
 ];
 
@@ -685,7 +695,7 @@ export async function render({ session }) {
         }
         args.push("-vf", `${geo},fps=30,format=yuv420p`);
         args.push("-ar", "48000", "-ac", "2", "-c:a", "aac", "-b:a", "128k");
-        args.push(...ENC, "-shortest", out);
+        args.push(...ENC_SEG, "-shortest", out);
         await ffmpegRun(args);
         segFiles.push(out);
       }
@@ -700,7 +710,7 @@ export async function render({ session }) {
         "-vf", overlayFilter({ edl, totalDur, accentHex: coach.accent_hex, dir, writeFileSync }),
         "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
         "-c:a", "aac", "-b:a", "128k",
-        ...ENC,
+        ...ENC_FINAL,
         "-movflags", "+faststart",
         out,
       ]);
