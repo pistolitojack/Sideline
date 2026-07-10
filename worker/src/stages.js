@@ -230,9 +230,62 @@ export async function understand({ session }) {
   return "compose";
 }
 
+// Scan the coach's public Instagram once (needs APIFY_TOKEN) and distill it
+// into a brand brief the writers use. Fails soft — no scan, no problem.
+async function ensureIgProfile(coach) {
+  if (coach.ig_profile || !coach.ig_handle || !process.env.APIFY_TOKEN)
+    return;
+  try {
+    const handle = String(coach.ig_handle).replace(/^@/, "").trim();
+    const res = await fetch(
+      `https://api.apify.com/v2/acts/apify~instagram-profile-scraper/run-sync-get-dataset-items?token=${process.env.APIFY_TOKEN}&timeout=120`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ usernames: [handle] }),
+      }
+    );
+    if (!res.ok) throw new Error(`apify ${res.status}`);
+    const items = await res.json();
+    const p = Array.isArray(items) ? items[0] : null;
+    if (!p) throw new Error("profile not found");
+    const posts = (p.latestPosts ?? []).slice(0, 12).map((x) => ({
+      caption: String(x.caption ?? "").slice(0, 300),
+      likes: x.likesCount,
+      comments: x.commentsCount,
+      type: x.type,
+    }));
+    const reply = await askClaude({
+      system:
+        "You distill social profiles into concise brand briefs for ghostwriters. Reply with plain text only.",
+      content: [
+        {
+          type: "text",
+          text: [
+            `Summarize this coach's Instagram in under 180 words for a ghostwriter:`,
+            `what they post, caption style (length, emoji use, phrasing),`,
+            `recurring themes, and which posts perform best and why.`,
+            `Bio: ${p.biography ?? ""}`,
+            `Followers: ${p.followersCount ?? "?"}`,
+            `Recent posts: ${JSON.stringify(posts)}`,
+          ].join("\n"),
+        },
+      ],
+      maxTokens: 600,
+    });
+    const summary = reply.trim().slice(0, 2000);
+    await db.from("coaches").update({ ig_profile: summary }).eq("id", coach.id);
+    coach.ig_profile = summary;
+    console.log(`  scanned IG @${handle}`);
+  } catch (e) {
+    console.warn(`ig scan skipped: ${e.message}`);
+  }
+}
+
 /* ——— Stage 4: Claude writes each piece (EDL + copy) ——— */
 export async function compose({ session }) {
   const coach = await loadCoach(session);
+  await ensureIgProfile(coach);
   const assets = await loadAssets(session.id);
   const byId = Object.fromEntries(assets.map((a) => [a.id, a]));
 
@@ -279,8 +332,20 @@ export async function compose({ session }) {
     `name=${coach.name}; sport=${coach.sport}; tones=${(coach.tones ?? []).join(", ")};`,
     `audience=${coach.audience}; mission=${coach.mission}.`,
     coach.voice_memo_transcript
-      ? `How the coach actually talks (voice memo transcript): "${coach.voice_memo_transcript.slice(0, 1200)}"`
+      ? `VOICE SAMPLE — use it ONLY to copy the coach's STYLE (tone, rhythm,`
       : `(No voice memo — write plain, direct, no corporate tone.)`,
+    coach.voice_memo_transcript
+      ? `vocabulary, sentence length). NEVER reuse its topic, opinions, or`
+      : ``,
+    coach.voice_memo_transcript
+      ? `examples as content — it is a sound check, not source material:`
+      : ``,
+    coach.voice_memo_transcript
+      ? `"${coach.voice_memo_transcript.slice(0, 1200)}"`
+      : ``,
+    coach.ig_profile
+      ? `WHAT THE COACH ALREADY POSTS (their real Instagram, scanned): ${String(coach.ig_profile).slice(0, 1800)}`
+      : ``,
     session.brief
       ? `THE COACH'S NOTE FOR THIS SESSION (top priority, honor it in every piece): "${String(session.brief).slice(0, 500)}"`
       : ``,
@@ -427,6 +492,9 @@ async function composeMontage({ session, coach, moments, byId }) {
     `You are cutting ${wantTwo ? "TWO DIFFERENT mix-tape reels" : "ONE mix-tape reel"} for a sports coach`,
     `from today's best raw moments (${new Set(usable.map((m) => m.asset_id)).size} different videos).`,
     `Coach: ${coach.name}; sport=${coach.sport}; mission=${coach.mission}.`,
+    coach.ig_profile
+      ? `Their real Instagram (match this vibe): ${String(coach.ig_profile).slice(0, 1000)}`
+      : ``,
     session.brief
       ? `THE COACH'S NOTE (honor it): "${String(session.brief).slice(0, 500)}"`
       : ``,
@@ -864,7 +932,7 @@ export async function revise({ session }) {
       `existing finished piece. Coach: ${coach.name}; sport=${coach.sport};`,
       `tones=${(coach.tones ?? []).join(", ")}; mission=${coach.mission}.`,
       coach.voice_memo_transcript
-        ? `How the coach talks: "${coach.voice_memo_transcript.slice(0, 800)}"`
+        ? `Voice sample (STYLE ONLY — copy tone and rhythm, never its topic): "${coach.voice_memo_transcript.slice(0, 800)}"`
         : ``,
       ``,
       `THE CURRENT PIECE (format=${piece.format}):`,

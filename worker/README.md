@@ -12,6 +12,7 @@ The background service that turns queued sessions into finished pieces:
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Project Settings → API → `service_role` key (**secret** — server only) |
 | `DEEPGRAM_API_KEY` | console.deepgram.com → API Keys |
 | `ANTHROPIC_API_KEY` | console.anthropic.com → API Keys |
+| `APIFY_TOKEN` | optional — console.apify.com → Settings → API tokens; enables real Instagram profile scanning |
 | `POLL_INTERVAL_MS` | optional, default `5000` |
 
 ## Deploy on Railway

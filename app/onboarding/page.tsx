@@ -258,19 +258,23 @@ export default function OnboardingPage() {
         router.push("/login");
         return;
       }
-      const { error } = await supabase.from("coaches").insert({
-        auth_user_id: user.id,
-        name: name.trim() || "Coach",
-        sport,
-        tones,
-        accent_hex: accent.a,
-        audience: "Youth athletes & their parents",
-        mission: customMission.trim() || mission,
-        ig_handle: handle.trim() || null,
-        voice_memo_transcript: transcript || null,
-      });
-      // Already onboarded (duplicate row)? Just go into the app.
-      if (error && error.code !== "23505") throw error;
+      // Upsert: running onboarding again UPDATES the coach's profile.
+      const { error } = await supabase.from("coaches").upsert(
+        {
+          auth_user_id: user.id,
+          name: name.trim() || "Coach",
+          sport,
+          tones,
+          accent_hex: accent.a,
+          audience: "Youth athletes & their parents",
+          mission: customMission.trim() || mission,
+          ig_handle: handle.trim() || null,
+          voice_memo_transcript: transcript || null,
+          ig_profile: null, // new handle → fresh scan on the next session
+        },
+        { onConflict: "auth_user_id" }
+      );
+      if (error) throw error;
       router.push("/");
       router.refresh();
     } catch {
@@ -321,8 +325,8 @@ export default function OnboardingPage() {
               lineHeight: 1.5,
             }}
           >
-            Talk for up to 60 seconds. This one recording teaches your employee
-            how you actually sound.
+            Talk for up to 60 seconds. Your employee copies how you
+            sound — your rhythm and word choice — never what you say here.
           </p>
           <button
             onClick={() =>

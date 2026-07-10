@@ -160,8 +160,8 @@ export default function VoiceMemoSheet({
             lineHeight: 1.5,
           }}
         >
-          Talk for up to 60 seconds. Your employee learns to write the way you
-          actually sound.
+          Talk for up to 60 seconds. Your employee copies how you sound — your
+          rhythm and word choice — never what you say here.
         </p>
         <button
           onClick={() =>
