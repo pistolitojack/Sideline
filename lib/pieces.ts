@@ -82,7 +82,7 @@ export async function loadPieces(
   const sign = async (path: string, download = false) => {
     const { data } = await supabase.storage
       .from("raw")
-      .createSignedUrl(path, 3600, download ? { download: true } : undefined);
+      .createSignedUrl(path, 86400, download ? { download: true } : undefined);
     return data?.signedUrl ?? "";
   };
 

@@ -32,16 +32,16 @@ export default function Footage({
       className="relative w-full h-full overflow-hidden select-none"
       style={{ background: "#0D0C0A" }}
     >
-      {piece.videoUrl ? (
+      {piece.videoUrl && (!small || !piece.img) ? (
         <video
           ref={videoRef}
           src={piece.videoUrl}
           poster={piece.img || undefined}
-          autoPlay={playing}
+          autoPlay={playing && !small}
           muted={muted}
           loop
           playsInline
-          preload="metadata"
+          preload={playing && !small ? "metadata" : "none"}
           className="absolute inset-0 w-full h-full"
           style={{ objectFit: "cover" }}
         />
