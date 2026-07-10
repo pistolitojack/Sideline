@@ -17,6 +17,7 @@ const DAY_INDEX: Record<string, number> = {
 
 type Row = {
   id: string;
+  session_id: string;
   format: string | null;
   edl: {
     in?: number;
@@ -55,7 +56,7 @@ export async function loadPieces(
   const { data: rows } = await supabase
     .from("content_pieces")
     .select(
-      "id, format, edl, render_asset_id, hook, caption, hashtags, cta, why, suggested_slot, suggested_sound, status, skip_reason, created_at, sessions!inner(coach_id)"
+      "id, session_id, format, edl, render_asset_id, hook, caption, hashtags, cta, why, suggested_slot, suggested_sound, status, skip_reason, created_at, sessions!inner(coach_id)"
     )
     .eq("sessions.coach_id", coachId)
     .in("status", ["ready", "approved", "skipped", "downloaded"])
@@ -115,6 +116,7 @@ export async function loadPieces(
 
       return {
         id: r.id,
+        sessionId: r.session_id,
         kind: (r.format === "story" ? "Story" : "Reel") as Piece["kind"],
         type: TYPE_LABEL[r.edl?.type ?? ""] ?? "Teaching",
         img,

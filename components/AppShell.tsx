@@ -87,6 +87,31 @@ export default function AppShell({
     }
   };
 
+  const requestRevision = (piece: Piece, note: string) => {
+    setPieces((ps) => ps.filter((p) => p.id !== piece.id));
+    if (
+      !demo &&
+      typeof piece.id === "string" &&
+      piece.sessionId &&
+      hasSupabaseEnv()
+    ) {
+      const c = createClient();
+      c.from("content_pieces")
+        .update({ revision_note: note.slice(0, 600), status: "rendering" })
+        .eq("id", piece.id)
+        .then(() =>
+          c
+            .from("jobs")
+            .insert({
+              session_id: piece.sessionId,
+              stage: "revise",
+              status: "pending",
+            })
+        )
+        .then(undefined, () => {});
+    }
+  };
+
   const removePiece = (id: number | string) => {
     setPieces((ps) => ps.filter((p) => p.id !== id));
     if (!demo && typeof id === "string" && hasSupabaseEnv()) {
@@ -139,6 +164,7 @@ export default function AppShell({
           initialActiveSession={activeSession}
           onDownloaded={markDownloaded}
           onDelete={removePiece}
+          onRevise={requestRevision}
         />
       )}
       {tab === "review" && (
@@ -147,6 +173,7 @@ export default function AppShell({
           onDecision={decide}
           goToday={() => setTab("today")}
           accent={accent}
+          onRevise={requestRevision}
         />
       )}
       {tab === "business" && <Business mission={mission} accent={accent} />}

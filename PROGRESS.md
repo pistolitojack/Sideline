@@ -1,5 +1,24 @@
 # Sideline — Build Progress
 
+## V2 Creative Engine (part 2) ✅ built & transition chain test-rendered
+
+- **The revision loop**: every real piece (Review detail sheet + Today's
+  approved sheet) has "Ask for changes" — the coach's note flips the piece
+  to `rendering`, queues a `revise` job, and the worker's editor applies the
+  note (re-cut bounds, captions, copy, transitions), then re-renders just
+  that piece. Requires `supabase/v3-revisions.sql` (adds
+  content_pieces.revision_note).
+- **Montage transitions**: the composer picks a transition per cut (hard cut
+  on beats, crossfade for mood, occasional slide/circle wipes) and the
+  renderer joins segments with ffmpeg xfade/acrossfade. Verified locally.
+- **Cleanup stage**: a `cleanup` job deletes orphaned render files (old
+  re-renders, deleted reels) and pipeline artifacts (wav/transcripts) of
+  finished sessions. Queue with:
+  `insert into jobs (session_id, stage, status)
+   select id, 'cleanup', 'pending' from sessions order by created_at desc limit 1;`
+- Render stage is selective again: only `rendering` pieces (fresh or
+  revised) re-render; force a full re-render by setting statuses first.
+
 ## V2 Creative Engine (part 1) ✅ built & montage pipeline test-rendered
 
 - **Mix-tape montage reels**: toggle on the upload screen — the AI cuts ONE

@@ -6,6 +6,7 @@ export type PieceStatus = "ready" | "approved" | "skipped" | "downloaded";
 
 export type Piece = {
   id: number | string; // number = demo seed, string = content_pieces uuid
+  sessionId?: string | null; // owning session (real pieces only)
   kind: "Reel" | "Story";
   type: string; // Teaching | Hype | Story | Behind the scenes | ...
   img: string; // poster image (public path or signed URL)

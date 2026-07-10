@@ -13,6 +13,7 @@ export default function Review({
   onDecision,
   goToday,
   accent,
+  onRevise,
 }: {
   pieces: Piece[];
   onDecision: (
@@ -22,6 +23,7 @@ export default function Review({
   ) => void;
   goToday: () => void;
   accent: string;
+  onRevise: (piece: Piece, note: string) => void;
 }) {
   const queue = pieces.filter((p) => p.status === "ready");
   const piece = queue[0];
@@ -91,6 +93,11 @@ export default function Review({
         onInteract={() => setHint(false)}
         onApprove={() => approve(piece)}
         onSkip={(reason) => skip(piece, reason)}
+        onRevise={(note) => {
+          setToast("Your editor is on it — check back in a few minutes");
+          setTimeout(() => setToast(null), 2600);
+          onRevise(piece, note);
+        }}
       />
       {toast && (
         <div className="absolute inset-x-0 flex justify-center sl-rise" style={{ top: 8 }}>
@@ -123,6 +130,7 @@ function SwipeCard({
   onInteract,
   onApprove,
   onSkip,
+  onRevise,
 }: {
   piece: Piece;
   next?: Piece;
@@ -131,12 +139,14 @@ function SwipeCard({
   onInteract: () => void;
   onApprove: () => void;
   onSkip: (reason: string | null) => void;
+  onRevise: (note: string) => void;
 }) {
   const [dx, setDx] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [fly, setFly] = useState<"left" | "right" | null>(null);
   const [sheet, setSheet] = useState(false);
   const [detail, setDetail] = useState(false);
+  const [note, setNote] = useState("");
   const startX = useRef<number | null>(null);
   const dxRef = useRef(0);
   const moved = useRef(false);
@@ -531,6 +541,64 @@ function SwipeCard({
                 >
                   {piece.why}
                 </p>
+              </div>
+            )}
+            {typeof piece.id === "string" && (
+              <div style={{ marginTop: 14 }}>
+                <p
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 700,
+                    letterSpacing: "0.08em",
+                    color: BASE.muted,
+                    textTransform: "uppercase",
+                  }}
+                >
+                  Ask for changes
+                </p>
+                <textarea
+                  value={note}
+                  onChange={(e) => setNote(e.target.value.slice(0, 600))}
+                  rows={2}
+                  placeholder={
+                    '"Trim the first 3 seconds", "punchier hook", "remove the last clip", "make it faster"\u2026'
+                  }
+                  style={{
+                    fontSize: 13.5,
+                    color: BASE.ink,
+                    background: BASE.paper,
+                    border: `1px solid ${BASE.faint}`,
+                    borderRadius: 12,
+                    padding: "10px 12px",
+                    width: "100%",
+                    marginTop: 8,
+                    outline: "none",
+                    resize: "none",
+                    fontFamily: "inherit",
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    if (!note.trim()) return;
+                    setDetail(false);
+                    onRevise(note.trim());
+                  }}
+                  disabled={!note.trim()}
+                  style={{
+                    borderRadius: 12,
+                    border: "none",
+                    background: note.trim() ? accent : BASE.faint,
+                    color: note.trim() ? "#fff" : BASE.muted,
+                    fontSize: 13.5,
+                    fontWeight: 700,
+                    padding: "11px 0",
+                    width: "100%",
+                    marginTop: 8,
+                    cursor: note.trim() ? "pointer" : "default",
+                  }}
+                >
+                  Send to your editor
+                </button>
               </div>
             )}
             <p

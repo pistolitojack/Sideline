@@ -442,8 +442,13 @@ async function composeMontage({ session, coach, moments, byId }) {
     `- Captions: one hook in the first 2s + 1-2 body beats. Times are relative`,
     `  to the montage start (t=0).`,
     ``,
+    `- Each segment names its transition INTO the next segment:`,
+    `  "cut" (hard cut on the beat — the default for energy),`,
+    `  "fade" (smooth crossfade for mood shifts),`,
+    `  "slideleft"/"slideright" (whip to a new angle), "circleopen" (reveal).`,
+    `  Mostly cuts and fades; at most 1-2 specialty wipes per reel.`,
     `Return ONLY this JSON object:`,
-    `{"segments": [{"moment_index": 0, "in": <abs seconds>, "out": <abs seconds>}, ...],`,
+    `{"segments": [{"moment_index": 0, "in": <abs seconds>, "out": <abs seconds>, "transition": "cut|fade|slideleft|slideright|circleopen"}, ...],`,
     ` "captions": [{"text": "HOOK.", "t0": 0, "t1": 2.2, "style": "hook"},`,
     `              {"text": "body beat", "t0": 8, "t1": 11, "style": "body"}],`,
     ` "hook": "...", "caption": "1-3 sentences in the coach's voice",`,
@@ -478,7 +483,13 @@ async function composeMontage({ session, coach, moments, byId }) {
       const end = Math.min(hi, Math.max(start + 1, Math.min(Number(seg.out), start + 6)));
       if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < 1)
         return null;
-      return { asset_id: m.asset_id, in: start, out: end };
+      const TRANSITIONS = ["cut", "fade", "slideleft", "slideright", "circleopen"];
+      return {
+        asset_id: m.asset_id,
+        in: start,
+        out: end,
+        transition: TRANSITIONS.includes(seg.transition) ? seg.transition : "cut",
+      };
     })
     .filter(Boolean)
     .filter((seg) => {
@@ -644,9 +655,24 @@ export async function render({ session }) {
     .in("status", ["rendering", "ready", "approved", "downloaded"]);
   if (error) throw new Error(`load pieces: ${error.message}`);
 
+  const { data: renderAssets } = await db
+    .from("media_assets")
+    .select("id, storage_path")
+    .eq("session_id", session.id)
+    .eq("kind", "render");
+  const assetPath = Object.fromEntries(
+    (renderAssets ?? []).map((a) => [a.id, a.storage_path])
+  );
+
   for (const piece of pieces ?? []) {
     const edl = piece.edl;
     if (!edl) continue;
+    // Only pieces awaiting a render (fresh or revised) get re-rendered; to
+    // force a full re-render, set piece statuses to 'rendering' first.
+    const hasVideo =
+      piece.render_asset_id &&
+      assetPath[piece.render_asset_id]?.endsWith(".mp4");
+    if (piece.status !== "rendering" && hasVideo) continue;
     // Normalize: a single cut is a one-segment montage.
     const segments = (
       edl.segments?.length
@@ -699,21 +725,63 @@ export async function render({ session }) {
         await ffmpegRun(args);
         segFiles.push(out);
       }
-      const totalDur = segments.reduce((a, seg) => a + (seg.out - seg.in), 0);
-
-      // Pass 2: concat + captions + fades + loudnorm.
-      const listFile = join(dir, "list.txt");
-      writeFileSync(listFile, segFiles.map((f) => `file '${f}'`).join("\n"));
+      // Pass 2: join with transitions, then captions + fades + loudnorm.
+      const XFADE = {
+        cut: ["fade", 0.06], // imperceptible — reads as a hard cut
+        fade: ["fade", 0.25],
+        slideleft: ["slideleft", 0.3],
+        slideright: ["slideright", 0.3],
+        circleopen: ["circleopen", 0.3],
+      };
+      const durs = segments.map((seg) => seg.out - seg.in);
       const out = join(dir, "out.mp4");
-      await ffmpegRun([
-        "-y", "-f", "concat", "-safe", "0", "-i", listFile,
-        "-vf", overlayFilter({ edl, totalDur, accentHex: coach.accent_hex, dir, writeFileSync }),
-        "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
-        "-c:a", "aac", "-b:a", "128k",
-        ...ENC_FINAL,
-        "-movflags", "+faststart",
-        out,
-      ]);
+
+      if (segFiles.length === 1) {
+        const totalDur = durs[0];
+        await ffmpegRun([
+          "-y", "-i", segFiles[0],
+          "-vf", overlayFilter({ edl, totalDur, accentHex: coach.accent_hex, dir, writeFileSync }),
+          "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+          "-c:a", "aac", "-b:a", "128k",
+          ...ENC_FINAL,
+          "-movflags", "+faststart",
+          out,
+        ]);
+      } else {
+        const graph = [];
+        let acc = durs[0];
+        let vPrev = "0:v";
+        let aPrev = "0:a";
+        for (let i = 1; i < segFiles.length; i++) {
+          const [type, fd] =
+            XFADE[segments[i - 1].transition] ?? XFADE.fade;
+          const offset = Math.max(0, acc - fd).toFixed(3);
+          graph.push(
+            `[${vPrev}][${i}:v]xfade=transition=${type}:duration=${fd}:offset=${offset}[v${i}]`
+          );
+          graph.push(`[${aPrev}][${i}:a]acrossfade=d=${fd}[a${i}]`);
+          vPrev = `v${i}`;
+          aPrev = `a${i}`;
+          acc = acc - fd + durs[i];
+        }
+        const totalDur = acc;
+        graph.push(
+          `[${vPrev}]${overlayFilter({ edl, totalDur, accentHex: coach.accent_hex, dir, writeFileSync })}[vout]`
+        );
+        graph.push(`[${aPrev}]loudnorm=I=-16:TP=-1.5:LRA=11[aout]`);
+        await ffmpegRun([
+          "-y",
+          ...segFiles.flatMap((f) => ["-i", f]),
+          "-filter_complex", graph.join(";"),
+          "-map", "[vout]",
+          "-map", "[aout]",
+          "-c:a", "aac", "-b:a", "128k",
+          ...ENC_FINAL,
+          "-movflags", "+faststart",
+          out,
+        ]);
+      }
+      const totalDur = durs.reduce((a, d) => a + d, 0);
 
       const folder = byId[segments[0].asset_id].storage_path
         .split("/")
@@ -751,4 +819,215 @@ export async function render({ session }) {
   return null; // pipeline complete — session becomes ready
 }
 
-export const STAGES = { ingest, transcribe, understand, compose, render };
+/* ——— Revise: the coach's notes on a finished piece → re-edit ——— */
+export async function revise({ session }) {
+  const coach = await loadCoach(session);
+  const assets = await loadAssets(session.id);
+  const byId = Object.fromEntries(assets.map((a) => [a.id, a]));
+
+  const { data: pieces, error } = await db
+    .from("content_pieces")
+    .select("*")
+    .eq("session_id", session.id)
+    .not("revision_note", "is", null);
+  if (error) throw new Error(`load revisions: ${error.message}`);
+  if (!pieces?.length) return "render";
+
+  const assetList = assets
+    .map(
+      (a) =>
+        `${a.id} · ${Math.round(a.duration_sec ?? 0)}s · ${(a.width ?? 0) > (a.height ?? 0) ? "landscape" : "vertical"}`
+    )
+    .join("\n");
+
+  for (const piece of pieces) {
+    const prompt = [
+      `You are the coach's video editor applying their revision notes to an`,
+      `existing finished piece. Coach: ${coach.name}; sport=${coach.sport};`,
+      `tones=${(coach.tones ?? []).join(", ")}; mission=${coach.mission}.`,
+      coach.voice_memo_transcript
+        ? `How the coach talks: "${coach.voice_memo_transcript.slice(0, 800)}"`
+        : ``,
+      ``,
+      `THE CURRENT PIECE (format=${piece.format}):`,
+      JSON.stringify(
+        {
+          edl: piece.edl,
+          hook: piece.hook,
+          caption: piece.caption,
+          hashtags: piece.hashtags,
+          cta: piece.cta,
+        },
+        null,
+        1
+      ),
+      ``,
+      `SOURCE VIDEOS AVAILABLE (id · duration · orientation):`,
+      assetList,
+      ``,
+      `THE COACH'S REVISION REQUEST — apply it precisely, change nothing they`,
+      `didn't ask about:`,
+      `"${String(piece.revision_note).slice(0, 600)}"`,
+      ``,
+      `Rules: cuts may move anywhere inside the source durations. Stories max`,
+      `15s, reels max 60s. Caption beats stay inside the cut (t=0 = start).`,
+      `Multi-segment pieces keep 1.5-6s segments with a "transition" per`,
+      `segment from: cut|fade|slideleft|slideright|circleopen.`,
+      ``,
+      `Return ONLY this JSON object (same shape as the current piece):`,
+      `{"edl": {"segments": [{"asset_id": "...", "in": 0, "out": 3, "transition": "cut"}, ...]`,
+      `         OR {"asset_id": "...", "in": 0, "out": 12} for a single cut,`,
+      `  "crop": {"mode": "center|eased", "start_x_frac": 0.5},`,
+      `  "captions": [{"text": "...", "t0": 0, "t1": 2.4, "style": "hook|body"}]},`,
+      ` "hook": "...", "caption": "...", "hashtags": "...", "cta": "...",`,
+      ` "why": "one sentence on what you changed"}`,
+    ].join("\n");
+
+    const reply = await askClaude({
+      system:
+        "You are a precise short-form video editor. You apply the coach's notes faithfully and only ever reply with valid JSON.",
+      content: [{ type: "text", text: prompt }],
+      maxTokens: 4000,
+    });
+    const draft = extractJson(reply);
+
+    // Normalize + clamp the revised cut.
+    const TRANSITIONS = ["cut", "fade", "slideleft", "slideright", "circleopen"];
+    const maxLen = piece.format === "story" ? 15 : 60;
+    const rawSegs = draft.edl?.segments?.length
+      ? draft.edl.segments
+      : [{ asset_id: draft.edl?.asset_id, in: draft.edl?.in, out: draft.edl?.out }];
+    let total = 0;
+    const segments = rawSegs
+      .map((seg) => {
+        const asset = byId[seg.asset_id] ?? byId[piece.edl?.asset_id];
+        if (!asset) return null;
+        const hi = asset.duration_sec ?? Number(seg.out);
+        const start = Math.max(0, Math.min(Number(seg.in) || 0, hi - 1));
+        const end = Math.min(hi, Math.max(start + 1, Number(seg.out) || start + 1));
+        if (!(end - start >= 1)) return null;
+        return {
+          asset_id: asset.id,
+          in: start,
+          out: end,
+          transition: TRANSITIONS.includes(seg.transition) ? seg.transition : "cut",
+        };
+      })
+      .filter(Boolean)
+      .filter((seg) => {
+        if (total >= maxLen) return false;
+        total += seg.out - seg.in;
+        return true;
+      });
+    if (!segments.length) {
+      console.warn(`revision for piece ${piece.id} produced no usable cut — skipped`);
+      await db
+        .from("content_pieces")
+        .update({ revision_note: null, status: "ready" })
+        .eq("id", piece.id);
+      continue;
+    }
+
+    const captions = (draft.edl?.captions ?? [])
+      .filter((c) => c.text)
+      .map((c) => ({
+        text: String(c.text).slice(0, 80),
+        t0: Math.max(0, Math.min(Number(c.t0) || 0, total)),
+        t1: Math.max(0, Math.min(Number(c.t1) || 0, total)),
+        style: c.style === "hook" ? "hook" : "body",
+      }))
+      .filter((c) => c.t1 > c.t0);
+
+    const single = segments.length === 1;
+    const newEdl = {
+      ...(single
+        ? { asset_id: segments[0].asset_id, in: segments[0].in, out: segments[0].out }
+        : { segments }),
+      type: piece.edl?.type,
+      poster_asset_id: piece.edl?.poster_asset_id,
+      crop: {
+        mode: draft.edl?.crop?.mode === "eased" ? "eased" : "center",
+        start_x_frac: Number(draft.edl?.crop?.start_x_frac ?? 0.5),
+      },
+      captions,
+    };
+
+    const { error: upErr } = await db
+      .from("content_pieces")
+      .update({
+        edl: newEdl,
+        hook: String(draft.hook ?? piece.hook ?? "").slice(0, 200),
+        caption: String(draft.caption ?? piece.caption ?? "").slice(0, 2000),
+        hashtags: String(draft.hashtags ?? piece.hashtags ?? "").slice(0, 300),
+        cta: String(draft.cta ?? piece.cta ?? "").slice(0, 300),
+        why: String(draft.why ?? "Revised per your note.").slice(0, 500),
+        status: "rendering",
+        revision_note: null,
+      })
+      .eq("id", piece.id);
+    if (upErr) throw new Error(`apply revision: ${upErr.message}`);
+    console.log(`  revised piece ${piece.id}`);
+  }
+
+  return "render";
+}
+
+/* ——— Cleanup: free storage from artifacts and orphaned renders ——— */
+export async function cleanup() {
+  const chunks = (arr, n) =>
+    Array.from({ length: Math.ceil(arr.length / n) }, (_, i) =>
+      arr.slice(i * n, i * n + n)
+    );
+  let removed = 0;
+
+  // Orphaned render files: assets no piece references anymore (old
+  // re-renders, deleted reels).
+  const { data: renders } = await db
+    .from("media_assets")
+    .select("id, storage_path")
+    .eq("kind", "render");
+  const { data: pieces } = await db
+    .from("content_pieces")
+    .select("render_asset_id, edl");
+  const referenced = new Set();
+  for (const p of pieces ?? []) {
+    if (p.render_asset_id) referenced.add(p.render_asset_id);
+    if (p.edl?.poster_asset_id) referenced.add(p.edl.poster_asset_id);
+  }
+  const orphans = (renders ?? []).filter((r) => !referenced.has(r.id));
+  for (const batch of chunks(orphans, 100)) {
+    await db.storage.from("raw").remove(batch.map((o) => o.storage_path));
+    await db
+      .from("media_assets")
+      .delete()
+      .in("id", batch.map((o) => o.id));
+    removed += batch.length;
+  }
+
+  // Intermediate artifacts (wav + transcript) of finished sessions.
+  const { data: done } = await db
+    .from("sessions")
+    .select("id")
+    .in("status", ["ready", "failed"]);
+  const doneIds = (done ?? []).map((s) => s.id);
+  if (doneIds.length) {
+    const { data: raws } = await db
+      .from("media_assets")
+      .select("id, storage_path")
+      .eq("kind", "raw")
+      .in("session_id", doneIds);
+    const paths = (raws ?? []).flatMap((a) => [
+      artifactPath(a, "wav"),
+      artifactPath(a, "transcript.json"),
+    ]);
+    for (const batch of chunks(paths, 100)) {
+      await db.storage.from("raw").remove(batch);
+      removed += batch.length;
+    }
+  }
+
+  console.log(`cleanup done — removed up to ${removed} files`);
+  return null;
+}
+
+export const STAGES = { ingest, transcribe, understand, compose, render, revise, cleanup };

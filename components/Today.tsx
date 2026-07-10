@@ -36,6 +36,7 @@ export default function Today({
   initialActiveSession,
   onDownloaded,
   onDelete,
+  onRevise,
 }: {
   coach: Coach;
   coachId?: string;
@@ -49,6 +50,7 @@ export default function Today({
   initialActiveSession: ActiveSession;
   onDownloaded: (id: number | string) => void;
   onDelete: (id: number | string) => void;
+  onRevise: (piece: Piece, note: string) => void;
 }) {
   const router = useRouter();
   const [mSheet, setMSheet] = useState(false);
@@ -59,6 +61,7 @@ export default function Today({
   const [selPiece, setSelPiece] = useState<Piece | null>(null);
   const [copied, setCopied] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
+  const [reviseNote, setReviseNote] = useState("");
 
   const accent = coach.accentHex;
   const ready = pieces.filter((p) => p.status === "ready").length;
@@ -386,6 +389,7 @@ export default function Today({
                 onClick={() => {
                   setCopied(false);
                   setConfirmDel(false);
+                  setReviseNote("");
                   setSelPiece(p);
                 }}
                 className="sl-card-press"
@@ -579,6 +583,55 @@ export default function Today({
                 >
                   {copied ? "Copied ✓" : "Copy caption"}
                 </button>
+                {typeof selPiece.id === "string" && (
+                  <>
+                    <textarea
+                      value={reviseNote}
+                      onChange={(e) =>
+                        setReviseNote(e.target.value.slice(0, 600))
+                      }
+                      rows={2}
+                      placeholder={
+                        'Ask for changes: "trim the intro", "new hook", "remove the last clip"\u2026'
+                      }
+                      style={{
+                        fontSize: 13,
+                        color: BASE.ink,
+                        background: BASE.paper,
+                        border: `1px solid ${BASE.faint}`,
+                        borderRadius: 12,
+                        padding: "10px 12px",
+                        width: "100%",
+                        marginTop: 10,
+                        outline: "none",
+                        resize: "none",
+                        fontFamily: "inherit",
+                      }}
+                    />
+                    {reviseNote.trim() && (
+                      <button
+                        onClick={() => {
+                          onRevise(selPiece, reviseNote.trim());
+                          setSelPiece(null);
+                        }}
+                        style={{
+                          borderRadius: 12,
+                          border: "none",
+                          background: accent,
+                          color: "#fff",
+                          fontSize: 13.5,
+                          fontWeight: 700,
+                          padding: "11px 0",
+                          width: "100%",
+                          marginTop: 8,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Send to your editor
+                      </button>
+                    )}
+                  </>
+                )}
                 <button
                   onClick={() => {
                     if (!confirmDel) {
