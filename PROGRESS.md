@@ -1,5 +1,15 @@
 # Sideline — Build Progress
 
+## Phase 1 — Foundation & safety (in progress)
+
+- **1.1 Upload limits** ✅ built — enforces 200MB/video (rejected at pick
+  time), 6 videos/session, and 3 sessions per coach per rolling 24h. The
+  24h cap is enforced both in the UI (quota line + friendly block message +
+  disabled button) and in the database via a trigger
+  (`supabase/v5-upload-limits.sql`) so it survives refresh / private window.
+  Verified: pick 7 files → "first 6" note; pick a 300MB file → left out;
+  4th session in 24h → daily-limit copy; private window still blocked.
+
 ## V2 Creative Engine (part 2) ✅ built & transition chain test-rendered
 
 - **The revision loop**: every real piece (Review detail sheet + Today's
