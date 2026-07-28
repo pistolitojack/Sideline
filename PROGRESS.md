@@ -2,6 +2,14 @@
 
 ## Phase 1 — Foundation & safety (in progress)
 
+- **1.4 Security headers** ✅ built — `next.config.ts` now sends
+  Content-Security-Policy, X-Frame-Options: DENY, Referrer-Policy:
+  strict-origin-when-cross-origin, X-Content-Type-Options: nosniff, and
+  Permissions-Policy (camera/microphone limited to same-origin) on every
+  route. CSP allows self, the inline styles/scripts Next needs, and Supabase
+  (auth + storage signed URLs + realtime via *.supabase.co). Verified all
+  five headers on the served response. Nonce-based tightening logged in IDEAS.
+
 - **1.3 Poster-frame race** ✅ built — `content_pieces.render_asset_id`
   now stays `null` until the render stage produces the real mp4 (it used to
   temporarily point at the poster JPG). Pieces are reviewable right away
