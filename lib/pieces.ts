@@ -134,6 +134,7 @@ export async function loadPieces(
         why: r.why ?? "",
         status: r.status as Piece["status"],
         skipReason: r.skip_reason,
+        rendering: !isVideo, // no rendered mp4 yet → show the "Finishing edit…" overlay
       };
     })
   );

@@ -10,10 +10,12 @@ export default function Footage({
   piece,
   playing = true,
   small = false,
+  accent = "#C8102E",
 }: {
   piece: Piece;
   playing?: boolean;
   small?: boolean;
+  accent?: string;
 }) {
   const [wi, setWi] = useState(0);
   const [muted, setMuted] = useState(true);
@@ -64,7 +66,7 @@ export default function Footage({
           background: "linear-gradient(to top, rgba(0,0,0,0.55), transparent)",
         }}
       />
-      {!small && !piece.videoUrl && (
+      {!small && !piece.videoUrl && !piece.rendering && (
         <div
           className="absolute inset-x-0 flex items-center justify-center px-4"
           style={{ bottom: "26%" }}
@@ -82,6 +84,41 @@ export default function Footage({
           >
             {piece.words[wi]}
           </span>
+        </div>
+      )}
+      {piece.rendering && (
+        // Video still rendering: poster + a subtle accent-tinted overlay.
+        // Never loads a <video> — render_asset_id is null upstream.
+        <div
+          className="absolute inset-0 flex flex-col items-center justify-center"
+          style={{
+            background: `color-mix(in srgb, ${accent} 20%, rgba(0,0,0,0.45))`,
+            gap: small ? 0 : 10,
+          }}
+        >
+          <div
+            className="sl-spin"
+            style={{
+              width: small ? 15 : 24,
+              height: small ? 15 : 24,
+              borderRadius: 999,
+              border: `${small ? 2 : 3}px solid rgba(255,255,255,0.35)`,
+              borderTopColor: "#fff",
+            }}
+          />
+          {!small && (
+            <span
+              style={{
+                fontSize: 13,
+                fontWeight: 700,
+                color: "#fff",
+                letterSpacing: "0.01em",
+                textShadow: "0 1px 6px rgba(0,0,0,0.55)",
+              }}
+            >
+              Finishing edit…
+            </span>
+          )}
         </div>
       )}
       <div

@@ -216,7 +216,7 @@ function SwipeCard({
               opacity: 0.5,
             }}
           >
-            <Footage piece={next} playing={false} />
+            <Footage piece={next} playing={false} accent={accent} />
           </div>
         )}
         <div
@@ -239,7 +239,7 @@ function SwipeCard({
             background: "#000",
           }}
         >
-          <Footage piece={piece} />
+          <Footage piece={piece} accent={accent} />
           <div
             className="absolute"
             style={{

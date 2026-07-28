@@ -24,6 +24,7 @@ export type Piece = {
   why: string;
   status: PieceStatus;
   skipReason?: string | null;
+  rendering?: boolean; // video not rendered yet (render_asset_id is null)
 };
 
 export type Coach = {

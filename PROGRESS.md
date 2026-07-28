@@ -2,6 +2,14 @@
 
 ## Phase 1 — Foundation & safety (in progress)
 
+- **1.3 Poster-frame race** ✅ built — `content_pieces.render_asset_id`
+  now stays `null` until the render stage produces the real mp4 (it used to
+  temporarily point at the poster JPG). Pieces are reviewable right away
+  showing the poster + a subtle accent-tinted "Finishing edit…" overlay
+  (Footage component, used by Review and Today); no `<video>` is ever loaded
+  while the render is pending. Establishes the clean invariant the editing
+  engine depends on: render_asset_id is a valid mp4 or null, never a JPG.
+
 - **1.2 Coach location** ✅ built — new "Where do you coach?" step in
   onboarding (between mission and finish; "City, State"), saved to
   `coaches.city` (`supabase/v6-coach-city.sql`). Coaches who onboarded

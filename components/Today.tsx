@@ -515,7 +515,7 @@ export default function Today({
                     boxShadow: "0 10px 24px -10px rgba(0,0,0,0.4)",
                   }}
                 >
-                  <Footage piece={p} small playing={false} />
+                  <Footage piece={p} small playing={false} accent={accent} />
                 </div>
                 <p
                   style={{
@@ -686,7 +686,7 @@ export default function Today({
                   boxShadow: "0 12px 26px -12px rgba(0,0,0,0.45)",
                 }}
               >
-                <Footage piece={selPiece} small playing />
+                <Footage piece={selPiece} small playing accent={accent} />
               </div>
               <div className="flex-1 flex flex-col" style={{ minWidth: 0 }}>
                 <p

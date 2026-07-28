@@ -452,7 +452,9 @@ export async function compose({ session }) {
         captions,
         poster_asset_id: posterAsset.id,
       },
-      render_asset_id: posterAsset.id, // replaced by the video in the render stage
+      // Null until the render stage produces the mp4 — never the poster JPG.
+      // The app shows the poster + a "Finishing edit…" overlay while it's null.
+      render_asset_id: null,
       hook: String(piece.hook ?? "").slice(0, 200),
       caption: String(piece.caption ?? "").slice(0, 2000),
       hashtags: String(piece.hashtags ?? "").slice(0, 300),
@@ -460,7 +462,7 @@ export async function compose({ session }) {
       why: String(piece.why ?? "").slice(0, 500),
       suggested_slot: String(piece.suggested_slot ?? "").slice(0, 40),
       suggested_sound: String(piece.suggested_sound ?? "").slice(0, 120),
-      status: "rendering",
+      status: "ready",
     });
     if (insErr) throw new Error(`insert piece: ${insErr.message}`);
   }
@@ -625,7 +627,8 @@ async function composeMontage({ session, coach, moments, byId }) {
         captions,
         poster_asset_id: posterAsset.id,
       },
-      render_asset_id: posterAsset.id,
+      // Null until the render stage produces the mp4 — never the poster JPG.
+      render_asset_id: null,
       hook: String(draft.hook ?? "").slice(0, 200),
       caption: String(draft.caption ?? "").slice(0, 2000),
       hashtags: String(draft.hashtags ?? "").slice(0, 300),
@@ -635,7 +638,7 @@ async function composeMontage({ session, coach, moments, byId }) {
       ).slice(0, 500),
       suggested_slot: String(draft.suggested_slot ?? "").slice(0, 40),
       suggested_sound: String(draft.suggested_sound ?? "").slice(0, 120),
-      status: "rendering",
+      status: "ready",
     });
     if (insErr) throw new Error(`insert montage: ${insErr.message}`);
     made++;
