@@ -2,6 +2,13 @@
 
 ## Phase 1 — Foundation & safety (in progress)
 
+- **1.5 IG profile refresh** ✅ built — `coaches.scanned_at`
+  (`supabase/v6-ig-refresh.sql`) records when the Instagram scan last ran.
+  `ensureIgProfile` now re-scans when scanned_at is null or older than 30
+  days (instead of only once ever), and stamps scanned_at only on a
+  successful scan — a failed scan leaves it untouched so the next session
+  retries rather than waiting 30 days.
+
 - **1.4 Security headers** ✅ built — `next.config.ts` now sends
   Content-Security-Policy, X-Frame-Options: DENY, Referrer-Policy:
   strict-origin-when-cross-origin, X-Content-Type-Options: nosniff, and

@@ -230,11 +230,15 @@ export async function understand({ session }) {
   return "compose";
 }
 
-// Scan the coach's public Instagram once (needs APIFY_TOKEN) and distill it
-// into a brand brief the writers use. Fails soft — no scan, no problem.
+// Scan the coach's public Instagram (needs APIFY_TOKEN) and distill it into a
+// brand brief the writers use. Re-scans when the last scan is missing or older
+// than 30 days so the brief stays current. Fails soft — no scan, no problem,
+// and a failed scan leaves scanned_at untouched so the next session retries.
+const IG_RESCAN_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 async function ensureIgProfile(coach) {
-  if (coach.ig_profile || !coach.ig_handle || !process.env.APIFY_TOKEN)
-    return;
+  if (!coach.ig_handle || !process.env.APIFY_TOKEN) return;
+  const scannedMs = coach.scanned_at ? new Date(coach.scanned_at).getTime() : 0;
+  if (scannedMs && Date.now() - scannedMs < IG_RESCAN_MS) return; // fresh enough
   try {
     const handle = String(coach.ig_handle).replace(/^@/, "").trim();
     const res = await fetch(
@@ -274,8 +278,13 @@ async function ensureIgProfile(coach) {
       maxTokens: 600,
     });
     const summary = reply.trim().slice(0, 2000);
-    await db.from("coaches").update({ ig_profile: summary }).eq("id", coach.id);
+    const scannedAt = new Date().toISOString();
+    await db
+      .from("coaches")
+      .update({ ig_profile: summary, scanned_at: scannedAt })
+      .eq("id", coach.id);
     coach.ig_profile = summary;
+    coach.scanned_at = scannedAt;
     console.log(`  scanned IG @${handle}`);
   } catch (e) {
     console.warn(`ig scan skipped: ${e.message}`);
