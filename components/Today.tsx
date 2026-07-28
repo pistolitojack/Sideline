@@ -675,26 +675,29 @@ export default function Today({
                 margin: "0 auto 14px",
               }}
             />
-            <div className="flex" style={{ gap: 14 }}>
+            <div className="flex flex-col">
               <div
                 style={{
-                  width: 96,
-                  height: 170,
-                  borderRadius: 14,
+                  width: "100%",
+                  maxWidth: 216,
+                  margin: "0 auto 14px",
+                  aspectRatio: "9 / 16",
+                  borderRadius: 16,
                   overflow: "hidden",
-                  flexShrink: 0,
-                  boxShadow: "0 12px 26px -12px rgba(0,0,0,0.45)",
+                  boxShadow: "0 16px 34px -16px rgba(0,0,0,0.5)",
+                  background: "#000",
                 }}
               >
-                <Footage piece={selPiece} small playing accent={accent} />
+                <Footage piece={selPiece} playing accent={accent} />
               </div>
-              <div className="flex-1 flex flex-col" style={{ minWidth: 0 }}>
+              <div className="flex flex-col" style={{ minWidth: 0 }}>
                 <p
                   style={{
-                    fontSize: 15,
+                    fontSize: 16,
                     fontWeight: 800,
                     color: BASE.ink,
                     lineHeight: 1.3,
+                    textAlign: "center",
                   }}
                 >
                   {selPiece.hook}
@@ -704,12 +707,13 @@ export default function Today({
                     fontSize: 12,
                     color: BASE.muted,
                     marginTop: 4,
+                    marginBottom: 16,
                     fontWeight: 600,
+                    textAlign: "center",
                   }}
                 >
                   {selPiece.slot} · {selPiece.platforms.join(" + ")}
                 </p>
-                <div className="flex-1" />
                 {selPiece.videoUrl ? (
                   <a
                     href={selPiece.downloadUrl || selPiece.videoUrl}
