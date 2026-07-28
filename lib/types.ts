@@ -30,4 +30,5 @@ export type Coach = {
   name: string;
   mission: string;
   accentHex: string;
+  city?: string | null;
 };

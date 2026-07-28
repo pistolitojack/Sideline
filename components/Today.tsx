@@ -63,6 +63,44 @@ export default function Today({
   const [confirmDel, setConfirmDel] = useState(false);
   const [reviseNote, setReviseNote] = useState("");
 
+  // City nudge for coaches who onboarded before the city step existed.
+  const [cityValue, setCityValue] = useState<string | null>(coach.city ?? null);
+  const [cityDismissed, setCityDismissed] = useState(true); // assume dismissed until localStorage says otherwise (avoids a flash)
+  const [citySheet, setCitySheet] = useState(false);
+  const [cityInput, setCityInput] = useState("");
+  const [citySaving, setCitySaving] = useState(false);
+  const [citySaveErr, setCitySaveErr] = useState<string | null>(null);
+
+  const cityKey = coachId ? `sideline_city_dismissed_${coachId}` : null;
+  useEffect(() => {
+    if (!cityKey) return;
+    setCityDismissed(localStorage.getItem(cityKey) === "1");
+  }, [cityKey]);
+
+  const dismissCity = () => {
+    if (cityKey) localStorage.setItem(cityKey, "1");
+    setCityDismissed(true);
+  };
+
+  const saveCity = async () => {
+    const v = cityInput.trim();
+    if (!v || citySaving || !coachId) return;
+    setCitySaving(true);
+    setCitySaveErr(null);
+    const { error } = await createClient()
+      .from("coaches")
+      .update({ city: v })
+      .eq("id", coachId);
+    if (error) {
+      setCitySaveErr("Saving didn't work — try again in a moment.");
+      setCitySaving(false);
+      return;
+    }
+    setCityValue(v);
+    setCitySheet(false);
+    setCitySaving(false);
+  };
+
   const accent = coach.accentHex;
   const ready = pieces.filter((p) => p.status === "ready").length;
   const approved = pieces.filter(
@@ -278,6 +316,72 @@ export default function Today({
         </span>
       </button>
 
+      {!demo && coachId && !cityValue && !cityDismissed && (
+        <div
+          className="w-full mt-3 flex items-center sl-rise"
+          style={{
+            border: `1px solid ${BASE.faint}`,
+            background: BASE.card,
+            borderRadius: 18,
+            padding: "13px 16px",
+            gap: 10,
+            boxShadow: "0 12px 30px -22px rgba(26,25,21,0.4)",
+          }}
+        >
+          <button
+            onClick={() => {
+              setCityInput("");
+              setCitySaveErr(null);
+              setCitySheet(true);
+            }}
+            className="flex-1 flex items-center"
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              gap: 10,
+              textAlign: "left",
+              padding: 0,
+            }}
+          >
+            <span style={{ fontSize: 17, flexShrink: 0 }}>📍</span>
+            <span>
+              <span
+                style={{
+                  fontSize: 13.5,
+                  fontWeight: 700,
+                  color: BASE.ink,
+                  display: "block",
+                }}
+              >
+                Add your city
+              </span>
+              <span
+                style={{ fontSize: 12, color: BASE.muted, display: "block" }}
+              >
+                so your employee can tag local content — takes 5 seconds
+              </span>
+            </span>
+          </button>
+          <button
+            onClick={dismissCity}
+            aria-label="Dismiss"
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              color: BASE.muted,
+              fontSize: 20,
+              lineHeight: 1,
+              padding: "0 2px",
+              flexShrink: 0,
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {!voiceDone && !demo && coachId && (
         <button
           onClick={() => setVoiceSheet(true)}
@@ -461,6 +565,86 @@ export default function Today({
           onClose={() => setVoiceSheet(false)}
           onSaved={() => setVoiceDone(true)}
         />
+      )}
+
+      {citySheet && coachId && (
+        <div
+          className="fixed inset-0 flex flex-col justify-end"
+          style={{ background: "rgba(0,0,0,0.4)", zIndex: 46 }}
+          onClick={() => setCitySheet(false)}
+        >
+          <div
+            className="sl-rise"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "rgba(255,255,255,0.94)",
+              backdropFilter: "blur(18px)",
+              borderRadius: "24px 24px 0 0",
+              padding: "20px 20px calc(30px + env(safe-area-inset-bottom))",
+              maxWidth: 430,
+              margin: "0 auto",
+              width: "100%",
+            }}
+          >
+            <div
+              style={{
+                width: 36,
+                height: 4,
+                borderRadius: 4,
+                background: BASE.faint,
+                margin: "0 auto 14px",
+              }}
+            />
+            <p style={{ fontSize: 15, fontWeight: 700, color: BASE.ink }}>
+              Where do you coach?
+            </p>
+            <p style={{ fontSize: 12.5, color: BASE.muted, marginTop: 3 }}>
+              This shapes location hashtags and audience tuning.
+            </p>
+            <input
+              value={cityInput}
+              onChange={(e) => setCityInput(e.target.value)}
+              placeholder="City, State"
+              autoFocus
+              style={{
+                fontSize: 16,
+                fontWeight: 600,
+                color: BASE.ink,
+                background: BASE.paper,
+                border: `1.5px solid ${BASE.faint}`,
+                borderRadius: 14,
+                padding: "13px 16px",
+                width: "100%",
+                marginTop: 14,
+                outline: "none",
+              }}
+            />
+            {citySaveErr && (
+              <p style={{ fontSize: 13, color: "#B3261E", marginTop: 10 }}>
+                {citySaveErr}
+              </p>
+            )}
+            <button
+              onClick={saveCity}
+              disabled={!cityInput.trim() || citySaving}
+              style={{
+                border: "none",
+                cursor:
+                  !cityInput.trim() || citySaving ? "default" : "pointer",
+                borderRadius: 14,
+                background: !cityInput.trim() || citySaving ? BASE.faint : accent,
+                color: !cityInput.trim() || citySaving ? BASE.muted : "#fff",
+                fontSize: 14.5,
+                fontWeight: 700,
+                padding: "14px 0",
+                width: "100%",
+                marginTop: 14,
+              }}
+            >
+              {citySaving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
       )}
 
 {selPiece && (

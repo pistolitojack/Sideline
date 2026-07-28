@@ -2,6 +2,13 @@
 
 ## Phase 1 — Foundation & safety (in progress)
 
+- **1.2 Coach location** ✅ built — new "Where do you coach?" step in
+  onboarding (between mission and finish; "City, State"), saved to
+  `coaches.city` (`supabase/v6-coach-city.sql`). Coaches who onboarded
+  before this see a dismissible "Add your city" card on Today that opens a
+  sheet with the same input; once city is set the card never returns,
+  dismissal persists via localStorage. Soft-required — never blocks the app.
+
 - **1.1 Upload limits** ✅ built — enforces 200MB/video (rejected at pick
   time), 6 videos/session, and 3 sessions per coach per rolling 24h. The
   24h cap is enforced both in the UI (quota line + friendly block message +

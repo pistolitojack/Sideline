@@ -23,7 +23,7 @@ export default async function Home() {
   // Load the coach's profile ("Coach DNA"). New signups go to onboarding.
   const { data: coachRow } = await supabase
     .from("coaches")
-    .select("id, name, mission, accent_hex, voice_memo_transcript")
+    .select("id, name, mission, accent_hex, city, voice_memo_transcript")
     .eq("auth_user_id", user.id)
     .maybeSingle();
 
@@ -45,6 +45,7 @@ export default async function Home() {
     name: coachRow.name,
     mission: coachRow.mission ?? "More private clients",
     accentHex: coachRow.accent_hex ?? "#C8102E",
+    city: coachRow.city ?? null,
   };
   return (
     <AppShell

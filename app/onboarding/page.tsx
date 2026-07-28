@@ -141,8 +141,8 @@ function H({
 
 export default function OnboardingPage() {
   const router = useRouter();
-  const [step, setStep] = useState(0); // 0 welcome · 1 handle · 2 dna · 3 voice · 4 mission
-  const total = 5;
+  const [step, setStep] = useState(0); // 0 welcome · 1 handle · 2 dna · 3 voice · 4 mission · 5 city
+  const total = 6;
 
   const [handle, setHandle] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -153,6 +153,7 @@ export default function OnboardingPage() {
   const [tones, setTones] = useState<string[]>(["Direct", "Encouraging"]);
   const [mission, setMission] = useState("More private clients");
   const [customMission, setCustomMission] = useState("");
+  const [city, setCity] = useState("");
 
   const [rec, setRec] = useState<"idle" | "recording" | "processing" | "done">(
     "idle"
@@ -268,6 +269,7 @@ export default function OnboardingPage() {
           accent_hex: accent.a,
           audience: "Youth athletes & their parents",
           mission: customMission.trim() || mission,
+          city: city.trim() || null,
           ig_handle: handle.trim() || null,
           voice_memo_transcript: transcript || null,
           ig_profile: null, // new handle → fresh scan on the next session
@@ -485,7 +487,7 @@ export default function OnboardingPage() {
       }}
     >
       <div className="flex items-center" style={{ gap: 5, marginBottom: 22 }}>
-        {[1, 2, 3, 4].map((s) => (
+        {[1, 2, 3, 4, 5].map((s) => (
           <div
             key={s}
             style={{
@@ -738,6 +740,35 @@ export default function OnboardingPage() {
               padding: "13px 16px",
               width: "100%",
               marginTop: 12,
+              outline: "none",
+            }}
+          />
+          <div className="flex-1" />
+          <ObButton label="Continue" onClick={() => setStep(5)} ac={ac} />
+        </>
+      )}
+
+      {step === 5 && (
+        <>
+          <H
+            kicker={`6 of ${total} · Your turf`}
+            title="Where do you coach?"
+            sub="This shapes location hashtags and audience tuning."
+          />
+          <input
+            value={city}
+            onChange={(e) => setCity(e.target.value)}
+            placeholder="City, State"
+            style={{
+              fontSize: 16,
+              fontWeight: 600,
+              color: BASE.ink,
+              background: BASE.card,
+              border: `1.5px solid ${BASE.faint}`,
+              borderRadius: 14,
+              padding: "13px 16px",
+              width: "100%",
+              marginTop: 18,
               outline: "none",
             }}
           />
