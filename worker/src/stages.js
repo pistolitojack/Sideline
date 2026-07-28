@@ -1112,6 +1112,30 @@ export async function cleanup() {
     }
   }
 
+  // Original raw videos of OLD finished sessions — the biggest storage hog.
+  // After a few days the coach won't be revising that session, so the source
+  // footage is safe to purge. The finished reels (renders + posters) are
+  // separate files and are left untouched.
+  const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: oldDone } = await db
+    .from("sessions")
+    .select("id")
+    .in("status", ["ready", "failed"])
+    .lt("created_at", cutoff);
+  const oldIds = (oldDone ?? []).map((s) => s.id);
+  if (oldIds.length) {
+    const { data: rawVids } = await db
+      .from("media_assets")
+      .select("storage_path")
+      .eq("kind", "raw")
+      .in("session_id", oldIds);
+    const vidPaths = (rawVids ?? []).map((a) => a.storage_path);
+    for (const batch of chunks(vidPaths, 100)) {
+      await db.storage.from("raw").remove(batch);
+      removed += batch.length;
+    }
+  }
+
   console.log(`cleanup done — removed up to ${removed} files`);
   return null;
 }
