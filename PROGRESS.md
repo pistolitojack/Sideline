@@ -1,5 +1,16 @@
 # Sideline — Build Progress
 
+## Phase 2 — The AI director (in progress)
+
+- **2.1 Optional prompt at upload** ✅ built — removed the montage toggle;
+  the upload screen now has one optional 3-row prompt box ("tell your
+  employee what you want… or leave blank and let me decide"), saved as
+  `sessions.prompt`. Migration `supabase/v7-session-prompt.sql` adds
+  `prompt`, copies any legacy `brief` into it, and drops the unused
+  `montage` column. (The director stage in 2.2 is what reads `prompt`;
+  until then the worker still reads the legacy `brief`.)
+
+
 ## Phase 1 — Foundation & safety (in progress)
 
 - **1.5 IG profile refresh** ✅ built — `coaches.scanned_at`

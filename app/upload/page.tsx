@@ -30,8 +30,7 @@ export default function UploadPage() {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [items, setItems] = useState<Item[]>([]);
-  const [montage, setMontage] = useState(false);
-  const [brief, setBrief] = useState("");
+  const [prompt, setPrompt] = useState("");
   const [phase, setPhase] = useState<"pick" | "uploading" | "queued" | "failed">(
     "pick"
   );
@@ -140,8 +139,7 @@ export default function UploadPage() {
         coach_id: coach.id,
         status: "uploading",
       };
-      if (montage) sessionRow.montage = true;
-      if (brief.trim()) sessionRow.brief = brief.trim().slice(0, 500);
+      if (prompt.trim()) sessionRow.prompt = prompt.trim().slice(0, 500);
       const { data: sess, error: sessErr } = await supabase
         .from("sessions")
         .insert(sessionRow)
@@ -478,66 +476,12 @@ export default function UploadPage() {
             </p>
           )}
 
-          <button
-            onClick={() => setMontage((m) => !m)}
-            className="w-full mt-3 flex items-center sl-card-press"
-            style={{
-              border: montage
-                ? `1.5px solid var(--accent)`
-                : `1px solid ${BASE.faint}`,
-              background: montage
-                ? "color-mix(in srgb, var(--accent) 7%, #fff)"
-                : BASE.card,
-              borderRadius: 16,
-              padding: "13px 16px",
-              cursor: "pointer",
-              gap: 10,
-              textAlign: "left",
-            }}
-          >
-            <span
-              style={{
-                width: 22,
-                height: 22,
-                borderRadius: 7,
-                flexShrink: 0,
-                border: montage ? "none" : `1.5px solid ${BASE.faint}`,
-                background: montage ? "var(--accent)" : BASE.paper,
-                color: "#fff",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 13,
-                fontWeight: 800,
-              }}
-            >
-              {montage ? "✓" : ""}
-            </span>
-            <span>
-              <span
-                style={{
-                  fontSize: 13.5,
-                  fontWeight: 700,
-                  color: BASE.ink,
-                  display: "block",
-                }}
-              >
-                Mix-tape reel
-              </span>
-              <span
-                style={{ fontSize: 12, color: BASE.muted, display: "block" }}
-              >
-                Also cut one fast montage using ALL of these videos
-              </span>
-            </span>
-          </button>
-
           <textarea
-            value={brief}
-            onChange={(e) => setBrief(e.target.value.slice(0, 500))}
-            rows={2}
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value.slice(0, 500))}
+            rows={3}
             placeholder={
-              "Tell your employee anything (optional): \u201cfocus on the girl in blue\u201d, \u201cmake it funny\u201d, \u201cchampionship day\u201d\u2026"
+              "Optional \u2014 tell your employee what you want. Example: \u201cmake a hype reel from today\u2019s sled work\u201d or \u201cteaching breakdown of Marcus\u2019s first-step drill\u201d or leave blank and let me decide."
             }
             style={{
               fontSize: 13.5,
