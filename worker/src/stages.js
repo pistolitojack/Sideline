@@ -86,6 +86,209 @@ export async function ingest({ session }) {
       }
     });
   }
+  return "direct";
+}
+
+/* ——— Stage: the DIRECTOR — looks at the footage + coach + optional prompt
+   and writes the session's content plan. This is the brain: it decides what
+   kinds of pieces to make, clusters same-drill videos, and hands the plan to
+   the composer. Runs after ingest, before transcribe. ——— */
+const clamp01 = (n) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
+const clampNum = (n, lo, hi, dflt) =>
+  Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
+
+const DIRECTOR_SCHEMA = [
+  "Return ONE JSON object, nothing else, with EXACTLY these fields:",
+  "{",
+  '  "read_of_footage": "2-4 sentences: what is in the videos and how they',
+  "    relate — same drill or different? multiple camera angles of the SAME",
+  '    action, or one angle each? any progression/story across the clips?",',
+  '  "clusters": [',
+  '    {"cluster_id": "c1", "label": "short human label e.g. sled push drill",',
+  '     "video_ids": ["<the EXACT asset_id of each video in this group>"],',
+  '     "angle_variety_score": 0.0}',
+  "  ],",
+  '  "director_notes": "one short paragraph in the coach\'s voice: what you are',
+  '    going to make and why, given the footage and their request",',
+  '  "planned_pieces": [',
+  "    {",
+  '      "piece_id": "p1",',
+  '      "kind": "one of: single, montage, teaching, transformation,',
+  "        testimonial, pov, story, funny_moment — or a close variant that",
+  '        fits the footage better",',
+  '      "cluster_ids_to_use": ["c1"],   // [] means any footage will do',
+  '      "target_length_sec": 25,        // 15-45',
+  '      "structural_recipe": "human-readable shot plan the editor follows,',
+  "        e.g. hook (1s) -> wide establishing -> tight punch on the payoff ->",
+  "        outro; OR A/B/A multi-angle cut between two clips of the same rep;",
+  '        OR montage of 6 fast beats across all clips",',
+  '      "why_this_piece": "ONE line, coach\'s voice, why this piece deserves',
+  '        to exist for their mission/request"',
+  "    }",
+  "  ]",
+  "}",
+  "",
+  "HARD RULES:",
+  "- angle_variety_score = how many DIFFERENT camera angles of the SAME action",
+  "  exist in a cluster. One angle only = 0.0-0.3. Two clear angles of the",
+  "  same rep = 0.5+.",
+  "- A teaching or multi-angle piece REQUIRES a cluster with",
+  "  angle_variety_score >= 0.4. If NO cluster reaches that, DO NOT plan one —",
+  "  plan something the footage can actually deliver (single, montage, story).",
+  "- Never plan more pieces than the footage supports. Two short single-angle",
+  "  clips → 1-2 pieces, not 5. Normally 3-5 pieces when the footage allows.",
+  "- If the coach gave a request, it OVERRIDES variety — make what they asked.",
+  "- If no request, make a VARIED pack — do not repeat the same kind.",
+  "- EVERY piece MUST have a real why_this_piece (no empty strings).",
+  "- Use the EXACT asset_id strings shown above. Never invent ids.",
+].join("\n");
+
+function normalizePlan(raw, assets) {
+  const ids = new Set(assets.map((a) => a.id));
+  const clusters = (Array.isArray(raw?.clusters) ? raw.clusters : [])
+    .map((c, i) => ({
+      cluster_id: String(c?.cluster_id || `c${i + 1}`),
+      label: String(c?.label || "clip").slice(0, 80),
+      video_ids: (Array.isArray(c?.video_ids) ? c.video_ids : []).filter((v) =>
+        ids.has(v)
+      ),
+      angle_variety_score: clamp01(Number(c?.angle_variety_score)),
+    }))
+    .filter((c) => c.video_ids.length);
+  const clusterIds = new Set(clusters.map((c) => c.cluster_id));
+
+  const maxPieces = Math.max(1, Math.min(5, assets.length + 2));
+  let pieces = (Array.isArray(raw?.planned_pieces) ? raw.planned_pieces : [])
+    .map((p, i) => ({
+      piece_id: String(p?.piece_id || `p${i + 1}`),
+      kind: String(p?.kind || "single")
+        .toLowerCase()
+        .replace(/[^a-z_]/g, "")
+        .slice(0, 40) || "single",
+      cluster_ids_to_use: (Array.isArray(p?.cluster_ids_to_use)
+        ? p.cluster_ids_to_use
+        : []
+      ).filter((c) => clusterIds.has(c)),
+      target_length_sec: clampNum(Number(p?.target_length_sec), 10, 45, 25),
+      structural_recipe: String(p?.structural_recipe || "").slice(0, 600),
+      why_this_piece: String(p?.why_this_piece || "").slice(0, 300),
+    }))
+    .slice(0, maxPieces);
+
+  if (!pieces.length) {
+    pieces = [
+      {
+        piece_id: "p1",
+        kind: assets.length > 1 ? "montage" : "single",
+        cluster_ids_to_use: [],
+        target_length_sec: 25,
+        structural_recipe:
+          "hook on the strongest moment → the action → the payoff → outro",
+        why_this_piece: "The best moment from today's footage, cut clean.",
+      },
+    ];
+  }
+  for (const p of pieces) {
+    if (!p.why_this_piece)
+      p.why_this_piece = "A strong piece from today's session.";
+  }
+
+  return {
+    read_of_footage: String(raw?.read_of_footage || "").slice(0, 900),
+    clusters,
+    director_notes: String(raw?.director_notes || "").slice(0, 900),
+    planned_pieces: pieces,
+  };
+}
+
+export async function direct({ session }) {
+  const assets = await loadAssets(session.id);
+  const coach = await loadCoach(session);
+  const prompt = String(session.prompt ?? session.brief ?? "").trim();
+  const framesPer = assets.length > 4 ? 3 : 4;
+
+  const content = [
+    {
+      type: "text",
+      text:
+        "You are the creative DIRECTOR. Below are a few frames sampled from " +
+        "each video the coach just uploaded. Decide what short-form pieces to " +
+        "make. Study the frames carefully before planning.",
+    },
+  ];
+
+  for (let i = 0; i < assets.length; i++) {
+    const a = assets[i];
+    await withTmp(async (dir) => {
+      const local = await downloadTo(a.storage_path, join(dir, "in.mp4"));
+      const frames = await sampleFrames(local, a.duration_sec, dir, framesPer);
+      content.push({
+        type: "text",
+        text: `VIDEO ${i + 1} — asset_id: ${a.id} — duration: ${
+          a.duration_sec ? a.duration_sec.toFixed(1) : "?"
+        }s`,
+      });
+      for (const f of frames) {
+        content.push({ type: "text", text: `  frame at t=${f.t}s:` });
+        content.push(await imageBlock(f.path));
+      }
+    });
+  }
+
+  content.push({
+    type: "text",
+    text: [
+      "THE COACH:",
+      `- sport / focus: ${coach.sport ?? "?"}`,
+      `- audience: ${coach.audience ?? "?"}`,
+      `- mission right now: ${coach.mission ?? "?"}`,
+      `- city: ${coach.city ?? "not set"}`,
+      coach.ig_profile
+        ? `- their Instagram brand: ${String(coach.ig_profile).slice(0, 800)}`
+        : "- Instagram brand: not scanned",
+    ].join("\n"),
+  });
+
+  content.push({
+    type: "text",
+    text: prompt
+      ? `THE COACH'S REQUEST FOR THIS UPLOAD (TOP PRIORITY — honor it above everything): "${prompt.slice(
+          0,
+          500
+        )}"`
+      : "THE COACH GAVE NO REQUEST — you decide. Build a VARIED pack that serves their mission; mix the kinds, don't repeat one kind.",
+  });
+
+  content.push({ type: "text", text: DIRECTOR_SCHEMA });
+
+  const reply = await askClaude({
+    system:
+      "You are a world-class short-form video creative director for sports " +
+      "coaches. You reply with exactly one JSON object and no other text.",
+    content,
+    maxTokens: 2500,
+  });
+  const plan = normalizePlan(extractJson(reply), assets);
+
+  await db.from("sessions").update({ plan }).eq("id", session.id);
+
+  // Tag each asset with the cluster the director assigned it.
+  const clusterOf = {};
+  for (const c of plan.clusters)
+    for (const vid of c.video_ids)
+      clusterOf[vid] = { id: c.cluster_id, label: c.label };
+  for (const a of assets) {
+    const c = clusterOf[a.id];
+    if (c)
+      await db
+        .from("media_assets")
+        .update({ cluster_id: c.id, cluster_label: c.label })
+        .eq("id", a.id);
+  }
+
+  console.log(
+    `  directed ${plan.planned_pieces.length} piece(s) from ${assets.length} video(s)`
+  );
   return "transcribe";
 }
 
@@ -1152,4 +1355,4 @@ export async function cleanup() {
   return null;
 }
 
-export const STAGES = { ingest, transcribe, understand, compose, render, revise, cleanup };
+export const STAGES = { ingest, direct, transcribe, understand, compose, render, revise, cleanup };

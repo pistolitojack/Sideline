@@ -2,6 +2,21 @@
 
 ## Phase 2 — The AI director (in progress)
 
+- **2.2 The director stage** ✅ built — new `direct` pipeline stage runs
+  after ingest, before transcribe. It samples 3-4 frames per uploaded video
+  and sends them + the coach profile (sport, audience, mission, city,
+  ig_profile) + the optional prompt to Claude (vision), which returns a JSON
+  content plan: a read of the footage, clusters of same-drill videos (with an
+  angle_variety_score), director notes, and 3-5 planned pieces (kind,
+  cluster to use, target length, structural recipe, why_this_piece). Stored
+  on `sessions.plan`; each video is tagged with its cluster on
+  `media_assets.cluster_id/cluster_label`. Guardrails: honor the prompt as
+  top priority, aim for variety when there's no prompt, never plan more
+  pieces than the footage supports, never plan a multi-angle/teaching piece
+  without a cluster that actually has multiple angles. Migration
+  `supabase/v7-plan.sql`. (Compose still ignores the plan until 2.3 — the
+  plan is created and stored now, wired into content in the next item.)
+
 - **2.1 Optional prompt at upload** ✅ built — removed the montage toggle;
   the upload screen now has one optional 3-row prompt box ("tell your
   employee what you want… or leave blank and let me decide"), saved as
