@@ -2,6 +2,21 @@
 
 ## Phase 2 — The AI director (in progress)
 
+- **2.3 Compose follows the plan** ✅ built — `compose()` no longer decides
+  what to make. It reads `sessions.plan.planned_pieces` and produces one
+  content piece per planned piece: it gathers the moments from that piece's
+  cluster(s), asks Claude to realize the `structural_recipe` as a concrete
+  segment EDL (single cut or multi-clip with transitions) and to write the
+  hook/caption/hashtags/CTA shaped by the piece's kind and intent. The
+  planned kind and the director's `why_this_piece` are stored on
+  `content_pieces.piece_kind` / `director_intent` (migration
+  `supabase/v7-piece-intent.sql`); the Review card's "why I made this" line
+  now shows `director_intent`, and the type badge uses `piece_kind`. The old
+  self-deciding logic and the standalone montage function were removed —
+  montage is now just one kind the director can plan. Moment-finding
+  (understand) is prompt-aware too.
+
+
 - **2.2 The director stage** ✅ built — new `direct` pipeline stage runs
   after ingest, before transcribe. It samples 3-4 frames per uploaded video
   and sends them + the coach profile (sport, audience, mission, city,

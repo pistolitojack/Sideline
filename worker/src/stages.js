@@ -371,8 +371,8 @@ export async function understand({ session }) {
         text: [
           `You are analyzing raw training footage for a sports coach.`,
           `Coach profile: sport=${coach.sport}; audience=${coach.audience}; mission=${coach.mission}.`,
-          session.brief
-            ? `THE COACH'S NOTE FOR THIS SESSION (top priority, honor it): "${String(session.brief).slice(0, 500)}"`
+          session.prompt ?? session.brief
+            ? `THE COACH'S NOTE FOR THIS SESSION (top priority, honor it): "${String(session.prompt ?? session.brief).slice(0, 500)}"`
             : ``,
           `Video duration: ${asset.duration_sec ?? "unknown"}s.`,
           `Transcript with word start-times in seconds:`,
@@ -507,361 +507,249 @@ export async function compose({ session }) {
   const assets = await loadAssets(session.id);
   const byId = Object.fromEntries(assets.map((a) => [a.id, a]));
 
-  const { data: moments, error } = await db
+  const { data: allMoments, error } = await db
     .from("moments")
     .select("*")
     .eq("session_id", session.id)
-    .gte("score", 0.5)
+    .gte("score", 0.4)
     .order("score", { ascending: false });
   if (error) throw new Error(`load moments: ${error.message}`);
-  if (!moments?.length) throw new Error("no usable moments found");
+  if (!allMoments?.length) throw new Error("no usable moments found");
 
-  // Never give the coach more than 6 pieces to review (abundance is a
-  // burden). Montage sessions reserve two slots for the mix-tape variants.
-  const singleCap = session.montage ? 4 : 6;
-  const picked = [];
-  const seenTypes = new Set();
-  for (const m of moments) {
-    if (picked.length >= singleCap) break;
-    if (seenTypes.has(m.type) && moments.length > picked.length + 1) continue;
-    picked.push(m);
-    seenTypes.add(m.type);
-  }
-  for (const m of moments) {
-    if (picked.length >= Math.min(singleCap, moments.length)) break;
-    if (!picked.includes(m)) picked.push(m);
-  }
-  if (picked.length < 3) picked.push(...moments.filter((m) => !picked.includes(m)).slice(0, 3 - picked.length));
+  // The DIRECTOR's plan decides what to make; the composer no longer picks.
+  // Fall back to a single piece if a plan is somehow missing (old session).
+  const plan =
+    session.plan && Array.isArray(session.plan.planned_pieces)
+      ? session.plan
+      : {
+          clusters: [],
+          planned_pieces: [
+            {
+              piece_id: "p1",
+              kind: assets.length > 1 ? "montage" : "single",
+              cluster_ids_to_use: [],
+              target_length_sec: 25,
+              structural_recipe:
+                "hook on the strongest moment → the action → the payoff → outro",
+              why_this_piece: "The best of today's footage, cut clean.",
+            },
+          ],
+        };
 
-  // One writing sitting for the whole pack: the model sees every moment at
-  // once, so it can vary hooks/angles instead of converging on one formula.
-  const momentBrief = picked
-    .map((m, i) => {
-      const a = byId[m.asset_id];
-      const landscape = (a?.width ?? 0) > (a?.height ?? 0);
-      return `#${i} · type=${m.type} · ${m.t_start.toFixed(1)}s → ${m.t_end.toFixed(1)}s (${(
-        m.t_end - m.t_start
-      ).toFixed(1)}s available) · ${landscape ? "landscape" : "vertical"} source · reason: ${m.reason} · said: "${(m.transcript_span || "(no speech)").slice(0, 300)}"`;
-    })
-    .join("\n");
+  const clusterAssets = {}; // cluster_id -> Set(asset_id)
+  for (const c of plan.clusters ?? [])
+    clusterAssets[c.cluster_id] = new Set(c.video_ids);
 
-  const prompt = [
-    `You are the coach's content writer. Coach profile:`,
-    `name=${coach.name}; sport=${coach.sport}; tones=${(coach.tones ?? []).join(", ")};`,
-    `audience=${coach.audience}; mission=${coach.mission}.`,
-    coach.voice_memo_transcript
-      ? `VOICE SAMPLE — use it ONLY to copy the coach's STYLE (tone, rhythm,`
-      : `(No voice memo — write plain, direct, no corporate tone.)`,
-    coach.voice_memo_transcript
-      ? `vocabulary, sentence length). NEVER reuse its topic, opinions, or`
-      : ``,
-    coach.voice_memo_transcript
-      ? `examples as content — it is a sound check, not source material:`
-      : ``,
-    coach.voice_memo_transcript
-      ? `"${coach.voice_memo_transcript.slice(0, 1200)}"`
-      : ``,
-    coach.ig_profile
-      ? `WHAT THE COACH ALREADY POSTS (their real Instagram, scanned): ${String(coach.ig_profile).slice(0, 1800)}`
-      : ``,
-    session.brief
-      ? `THE COACH'S NOTE FOR THIS SESSION (top priority, honor it in every piece): "${String(session.brief).slice(0, 500)}"`
-      : ``,
-    ``,
-    `Today's moments — create one finished piece per moment (${picked.length} total):`,
-    momentBrief,
-    ``,
-    `VARIETY RULES — these make or break the coach's page:`,
-    `- Every hook uses a DIFFERENT structure. Rotate: bold claim, question,`,
-    `  contrarian take, direct callout to the viewer, mini-story opener, number/stat.`,
-    `- Never reuse a sentence pattern across pieces. Formulas like "X isn't born" or`,
-    `  "X is a skill" may appear at most ONCE in the whole set.`,
-    `- Vary the caption angle across pieces: teach one, celebrate one, tell the`,
-    `  story behind one, challenge the viewer in another.`,
-    `- Respect each moment's full length — a 30s teaching moment stays ~30s. Do NOT`,
-    `  trim everything to sub-10s clips; the set should mix short and long.`,
-    `  Story format max 15s; reels up to 60s.`,
-    `- Caption beats land inside the cut (t=0 = cut start): hook beat in the first`,
-    `  2-3 seconds, then 1-3 body beats spread through the cut.`,
-    ``,
-    `Return ONLY a JSON array, one object per moment:`,
-    `[{"moment_index": 0, "format": "reel|story",`,
-    `  "edl": {"in": <cut start s>, "out": <cut end s>,`,
-    `    "crop": {"mode": "center|eased", "start_x_frac": 0.35},`,
-    `    "captions": [{"text": "HOOK.", "t0": 0, "t1": 2.4, "style": "hook"},`,
-    `                 {"text": "body beat", "t0": 2.4, "t1": 5.0, "style": "body"}]},`,
-    `  "hook": "...", "caption": "1-4 sentences in the coach's voice",`,
-    `  "hashtags": "#four #to #six #tags", "cta": "aimed at the coach's mission",`,
-    `  "why": "one sentence explaining this choice to the coach",`,
-    `  "suggested_slot": "Tue 6:00 PM",`,
-    `  "suggested_sound": "a style of trending sound, never a specific song"}]`,
-  ].join("\n");
-
-  const reply = await askClaude({
-    system:
-      "You write short-form sports content in the coach's own voice. Every piece must feel different from the others. You only ever reply with valid JSON.",
-    content: [{ type: "text", text: prompt }],
-    maxTokens: 8000,
-  });
-  const drafts = extractJson(reply);
-  if (!Array.isArray(drafts) || !drafts.length)
-    throw new Error("compose returned no pieces");
-
-  for (const piece of drafts) {
-    const moment = picked[Number(piece.moment_index)];
-    const asset = moment ? byId[moment.asset_id] : null;
-    if (!moment || !asset) continue;
-
-    // Clamp the cut and caption beats to sane bounds.
-    const maxLen = piece.format === "story" ? 15 : 60;
-    const cutIn = Math.max(0, Number(piece.edl?.in ?? moment.t_start));
-    let cutOut = Math.min(
-      Number(piece.edl?.out ?? moment.t_end),
-      cutIn + maxLen
-    );
-    if (asset.duration_sec) cutOut = Math.min(cutOut, asset.duration_sec);
-    const cutLen = cutOut - cutIn;
-    if (!(cutLen > 1)) continue;
-    const captions = (piece.edl?.captions ?? [])
-      .filter((c) => c.text)
-      .map((c) => ({
-        text: String(c.text).slice(0, 80),
-        t0: Math.max(0, Math.min(Number(c.t0) || 0, cutLen)),
-        t1: Math.max(0, Math.min(Number(c.t1) || 0, cutLen)),
-        style: c.style === "hook" ? "hook" : "body",
-      }))
-      .filter((c) => c.t1 > c.t0);
-
-    // Poster frame from the middle of the cut → media_assets(kind render).
-    const folder = asset.storage_path.split("/").slice(0, 2).join("/");
-    const posterStorage = `${folder}/posters/${moment.id}.jpg`;
-    await withTmp(async (dir) => {
-      const local = await downloadTo(asset.storage_path, join(dir, "in.mp4"));
-      const poster = await posterFrame(
-        local,
-        cutIn + cutLen / 2,
-        join(dir, "poster.jpg")
-      );
-      await uploadFrom(poster, posterStorage, "image/jpeg");
-    });
-    const { data: posterAsset, error: posterErr } = await db
-      .from("media_assets")
-      .insert({
-        session_id: session.id,
-        storage_path: posterStorage,
-        kind: "render",
-      })
-      .select("id")
-      .single();
-    if (posterErr) throw new Error(`poster asset: ${posterErr.message}`);
-
-    const { error: insErr } = await db.from("content_pieces").insert({
-      session_id: session.id,
-      format: piece.format === "story" ? "story" : "reel",
-      edl: {
-        asset_id: asset.id,
-        in: cutIn,
-        out: cutOut,
-        type: moment.type,
-        crop: {
-          mode: piece.edl?.crop?.mode === "eased" ? "eased" : "center",
-          start_x_frac: Number(piece.edl?.crop?.start_x_frac ?? 0.35),
-        },
-        captions,
-        poster_asset_id: posterAsset.id,
-      },
-      // Null until the render stage produces the mp4 — never the poster JPG.
-      // The app shows the poster + a "Finishing edit…" overlay while it's null.
-      render_asset_id: null,
-      hook: String(piece.hook ?? "").slice(0, 200),
-      caption: String(piece.caption ?? "").slice(0, 2000),
-      hashtags: String(piece.hashtags ?? "").slice(0, 300),
-      cta: String(piece.cta ?? "").slice(0, 300),
-      why: String(piece.why ?? "").slice(0, 500),
-      suggested_slot: String(piece.suggested_slot ?? "").slice(0, 40),
-      suggested_sound: String(piece.suggested_sound ?? "").slice(0, 120),
-      status: "ready",
-    });
-    if (insErr) throw new Error(`insert piece: ${insErr.message}`);
-  }
-
-  // ——— Mix-tape reel: one montage cut across ALL the session's videos ———
-  if (session.montage && moments.length >= 3) {
+  let made = 0;
+  for (const pp of plan.planned_pieces.slice(0, 6)) {
     try {
-      await composeMontage({ session, coach, moments, byId });
+      const ok = await composePlannedPiece({
+        session,
+        coach,
+        byId,
+        allMoments,
+        pp,
+        clusterAssets,
+      });
+      if (ok) made++;
     } catch (e) {
-      // A failed montage never sinks the rest of the pack.
-      console.warn(`montage skipped: ${e.message}`);
+      // One bad piece never sinks the rest of the pack.
+      console.warn(`  piece ${pp.piece_id} skipped: ${e.message}`);
     }
   }
-
+  if (!made) throw new Error("no planned piece could be composed");
   return "render";
 }
 
-async function composeMontage({ session, coach, moments, byId }) {
-  const usable = moments.filter((m) => byId[m.asset_id]).slice(0, 14);
-  const clipList = usable
-    .map(
-      (m, i) =>
-        `#${i} · ${m.t_start.toFixed(1)}s → ${m.t_end.toFixed(1)}s · type=${m.type} · score=${m.score} · ${m.reason}`
-    )
+// Build ONE content piece from ONE of the director's planned pieces: pick the
+// moments from the piece's cluster(s), ask Claude to realize the structural
+// recipe as a concrete EDL + copy, extract a poster, and insert the piece.
+async function composePlannedPiece({
+  session,
+  coach,
+  byId,
+  allMoments,
+  pp,
+  clusterAssets,
+}) {
+  // Which moments may this piece draw from?
+  let pool = allMoments;
+  if (pp.cluster_ids_to_use?.length) {
+    const allowed = new Set();
+    for (const cid of pp.cluster_ids_to_use)
+      for (const aid of clusterAssets[cid] ?? []) allowed.add(aid);
+    const filtered = allMoments.filter((m) => allowed.has(m.asset_id));
+    if (filtered.length) pool = filtered;
+  }
+  pool = pool.slice(0, 16);
+  if (!pool.length) return false;
+
+  const momentList = pool
+    .map((m, i) => {
+      const a = byId[m.asset_id];
+      const landscape = (a?.width ?? 0) > (a?.height ?? 0);
+      return `#${i} · asset=${m.asset_id} · ${m.t_start.toFixed(
+        1
+      )}s→${m.t_end.toFixed(1)}s (${(m.t_end - m.t_start).toFixed(1)}s) · ${
+        landscape ? "landscape" : "vertical"
+      } source · ${m.type} · ${m.reason} · said: "${(
+        m.transcript_span || "(no speech)"
+      ).slice(0, 200)}"`;
+    })
     .join("\n");
-  const wantTwo = usable.length >= 5;
+
+  const multi = String(pp.kind) !== "single";
+  const target = clampNum(Number(pp.target_length_sec), 8, 60, 25);
 
   const prompt = [
-    `You are cutting ${wantTwo ? "TWO DIFFERENT mix-tape reels" : "ONE mix-tape reel"} for a sports coach`,
-    `from today's best raw moments (${new Set(usable.map((m) => m.asset_id)).size} different videos).`,
-    `Coach: ${coach.name}; sport=${coach.sport}; mission=${coach.mission}.`,
+    `You are the coach's editor + ghostwriter. Build the ONE piece the DIRECTOR asked for below.`,
+    `Coach: name=${coach.name}; sport=${coach.sport}; tones=${(
+      coach.tones ?? []
+    ).join(", ")}; audience=${coach.audience}; mission=${coach.mission}.`,
+    coach.voice_memo_transcript
+      ? `VOICE SAMPLE — copy STYLE only (tone, rhythm, word length), NEVER its topic or examples: "${coach.voice_memo_transcript.slice(
+          0,
+          900
+        )}"`
+      : `(No voice memo — write plain, direct, no corporate tone.)`,
     coach.ig_profile
-      ? `Their real Instagram (match this vibe): ${String(coach.ig_profile).slice(0, 1000)}`
-      : ``,
-    session.brief
-      ? `THE COACH'S NOTE (honor it): "${String(session.brief).slice(0, 500)}"`
+      ? `Their real Instagram vibe: ${String(coach.ig_profile).slice(0, 1200)}`
       : ``,
     ``,
-    `Available moments (pick sub-ranges from INSIDE them):`,
-    clipList,
+    `THE DIRECTOR'S BRIEF FOR THIS PIECE (follow it):`,
+    `- kind: ${pp.kind}`,
+    `- why it exists (keep this intent alive in the copy): ${pp.why_this_piece}`,
+    `- target length: ~${target}s`,
+    `- structural recipe to realize: ${pp.structural_recipe}`,
     ``,
-    `MONTAGE RULES (each variant):`,
-    `- 6-12 segments, each 1.5-4 seconds, total 20-40 seconds.`,
-    `- OPEN on an explosive payoff — earn the next 30 seconds in the first two.`,
-    `- Segments from at least 2 different moments; spread across videos.`,
-    `- Each segment names its transition INTO the next segment:`,
-    `  "cut" (hard cut on the beat — default), "fade" (mood shift),`,
-    `  "slideleft"/"slideright" (whip to new angle), "circleopen" (reveal).`,
-    `  Mostly cuts and fades; at most 1-2 specialty wipes per reel.`,
-    wantTwo
-      ? `THE TWO VARIANTS MUST FEEL DIFFERENT: variant 1 = pure adrenaline`
-      : ``,
-    wantTwo
-      ? `(fast cuts, biggest hits back to back); variant 2 = a different angle`
-      : ``,
-    wantTwo
-      ? `(story build, or technique thread, different opening clip, its own`
-      : ``,
-    wantTwo ? `hook and caption). Share at most half their segments.` : ``,
+    `Available moments — pick sub-ranges from INSIDE these (use the index numbers):`,
+    momentList,
     ``,
-    `Return ONLY a JSON array of ${wantTwo ? "2 objects" : "1 object"}:`,
-    `[{"segments": [{"moment_index": 0, "in": <abs s>, "out": <abs s>, "transition": "cut|fade|slideleft|slideright|circleopen"}, ...],`,
-    `  "captions": [{"text": "HOOK.", "t0": 0, "t1": 2.2, "style": "hook"},`,
-    `               {"text": "body beat", "t0": 8, "t1": 11, "style": "body"}],`,
-    `  "hook": "...", "caption": "1-3 sentences in the coach's voice",`,
-    `  "hashtags": "#four #to #six #tags", "cta": "aimed at the mission",`,
-    `  "why": "one sentence for the coach",`,
-    `  "suggested_slot": "Sat 10:00 AM",`,
-    `  "suggested_sound": "a style of trending sound, never a specific song"}]`,
-  ].join("\n");
+    multi
+      ? `Build ${
+          target < 20 ? "3-6" : "5-10"
+        } segments across the moments that realize the recipe. Each segment names the transition INTO the next: "cut" (hard cut, default), "fade" (mood shift), "slideleft"/"slideright" (whip to new angle), "circleopen" (reveal). Mostly cuts and fades; at most 1-2 specialty wipes.`
+      : `Build exactly ONE segment — a single clean cut that realizes the recipe (hook early, land the payoff).`,
+    `Aim for ~${target}s total, never over 60s. Multi-clip segments run 1-6s each; a single cut may run longer.`,
+    `Write the copy in the coach's voice, shaped by the kind and the intent above.`,
+    `Caption beats land inside the cut (t=0 = cut start): a hook beat in the first 2-3s, then 1-3 body beats.`,
+    ``,
+    `Return ONLY one JSON object:`,
+    `{"segments": [{"moment_index": 0, "in": <abs s>, "out": <abs s>, "transition": "cut"}],`,
+    ` "captions": [{"text":"HOOK.","t0":0,"t1":2.2,"style":"hook"},{"text":"body beat","t0":3,"t1":6,"style":"body"}],`,
+    ` "hook":"...", "caption":"1-4 sentences in the coach's voice", "hashtags":"#four #to #six #tags",`,
+    ` "cta":"aimed at the coach's mission", "suggested_slot":"Tue 6:00 PM",`,
+    ` "suggested_sound":"a style of trending sound, never a specific song"}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   const reply = await askClaude({
     system:
-      "You are a short-form sports video editor with elite taste in pacing. You only ever reply with valid JSON.",
+      "You are an elite short-form sports video editor and ghostwriter. You realize the director's recipe precisely and reply with exactly one valid JSON object.",
     content: [{ type: "text", text: prompt }],
-    maxTokens: 6000,
+    maxTokens: 3000,
   });
-  const parsed = extractJson(reply);
-  const drafts = (Array.isArray(parsed) ? parsed : [parsed]).slice(0, 2);
+  const draft = extractJson(reply);
 
   const TRANSITIONS = ["cut", "fade", "slideleft", "slideright", "circleopen"];
-  let made = 0;
-  for (let vi = 0; vi < drafts.length; vi++) {
-    const draft = drafts[vi];
-    let total = 0;
-    const segments = (draft.segments ?? [])
-      .map((seg) => {
-        const m = usable[Number(seg.moment_index)];
-        if (!m) return null;
-        const asset = byId[m.asset_id];
-        const lo = Math.max(0, m.t_start - 1);
-        const hi = Math.min(m.t_end + 1, asset.duration_sec ?? m.t_end + 1);
-        const start = Math.max(lo, Math.min(Number(seg.in), hi - 1));
-        const end = Math.min(
-          hi,
-          Math.max(start + 1, Math.min(Number(seg.out), start + 6))
-        );
-        if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < 1)
-          return null;
-        return {
-          asset_id: m.asset_id,
-          in: start,
-          out: end,
-          transition: TRANSITIONS.includes(seg.transition)
-            ? seg.transition
-            : "cut",
-        };
-      })
-      .filter(Boolean)
-      .filter((seg) => {
-        if (total >= 60) return false;
-        total += seg.out - seg.in;
-        return true;
-      });
-    if (segments.length < 3) {
-      console.warn(`montage variant ${vi + 1} had too few usable segments — skipped`);
-      continue;
-    }
-
-    const captions = (draft.captions ?? [])
-      .filter((c) => c.text)
-      .map((c) => ({
-        text: String(c.text).slice(0, 80),
-        t0: Math.max(0, Math.min(Number(c.t0) || 0, total)),
-        t1: Math.max(0, Math.min(Number(c.t1) || 0, total)),
-        style: c.style === "hook" ? "hook" : "body",
-      }))
-      .filter((c) => c.t1 > c.t0);
-
-    // Poster from the opening segment.
-    const first = segments[0];
-    const firstAsset = byId[first.asset_id];
-    const folder = firstAsset.storage_path.split("/").slice(0, 2).join("/");
-    const posterStorage = `${folder}/posters/montage-${session.id}-${vi}.jpg`;
-    await withTmp(async (dir) => {
-      const local = await downloadTo(firstAsset.storage_path, join(dir, "in.mp4"));
-      const poster = await posterFrame(
-        local,
-        first.in + (first.out - first.in) / 2,
-        join(dir, "poster.jpg")
+  let total = 0;
+  const segments = (Array.isArray(draft.segments) ? draft.segments : [])
+    .map((seg) => {
+      const m = pool[Number(seg.moment_index)];
+      if (!m) return null;
+      const a = byId[m.asset_id];
+      const lo = Math.max(0, m.t_start - 1);
+      const hi = Math.min(m.t_end + 1, a?.duration_sec ?? m.t_end + 1);
+      const start = Math.max(lo, Math.min(Number(seg.in), hi - 1));
+      const perSegCap = multi ? 6 : 60;
+      const end = Math.min(
+        hi,
+        Math.max(start + 1, Math.min(Number(seg.out), start + perSegCap))
       );
-      await uploadFrom(poster, posterStorage, "image/jpeg");
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < 1)
+        return null;
+      return {
+        asset_id: m.asset_id,
+        in: start,
+        out: end,
+        transition: TRANSITIONS.includes(seg.transition)
+          ? seg.transition
+          : "cut",
+      };
+    })
+    .filter(Boolean)
+    .filter((seg) => {
+      if (total >= 60) return false;
+      total += seg.out - seg.in;
+      return true;
     });
-    const { data: posterAsset, error: posterErr } = await db
-      .from("media_assets")
-      .insert({
-        session_id: session.id,
-        storage_path: posterStorage,
-        kind: "render",
-      })
-      .select("id")
-      .single();
-    if (posterErr) throw new Error(`montage poster: ${posterErr.message}`);
+  if (!segments.length) return false;
 
-    const { error: insErr } = await db.from("content_pieces").insert({
+  const captions = (Array.isArray(draft.captions) ? draft.captions : [])
+    .filter((c) => c.text)
+    .map((c) => ({
+      text: String(c.text).slice(0, 80),
+      t0: Math.max(0, Math.min(Number(c.t0) || 0, total)),
+      t1: Math.max(0, Math.min(Number(c.t1) || 0, total)),
+      style: c.style === "hook" ? "hook" : "body",
+    }))
+    .filter((c) => c.t1 > c.t0);
+
+  // Poster from the opening segment → media_assets(kind render).
+  const first = segments[0];
+  const firstAsset = byId[first.asset_id];
+  const folder = firstAsset.storage_path.split("/").slice(0, 2).join("/");
+  const posterStorage = `${folder}/posters/${session.id}-${pp.piece_id}.jpg`;
+  await withTmp(async (dir) => {
+    const local = await downloadTo(firstAsset.storage_path, join(dir, "in.mp4"));
+    const poster = await posterFrame(
+      local,
+      first.in + (first.out - first.in) / 2,
+      join(dir, "poster.jpg")
+    );
+    await uploadFrom(poster, posterStorage, "image/jpeg");
+  });
+  const { data: posterAsset, error: posterErr } = await db
+    .from("media_assets")
+    .insert({
       session_id: session.id,
-      format: "reel",
-      edl: {
-        segments,
-        type: "montage",
-        crop: { mode: "center", start_x_frac: 0.5 },
-        captions,
-        poster_asset_id: posterAsset.id,
+      storage_path: posterStorage,
+      kind: "render",
+    })
+    .select("id")
+    .single();
+  if (posterErr) throw new Error(`poster asset: ${posterErr.message}`);
+
+  const isMulti = segments.length > 1;
+  const { error: insErr } = await db.from("content_pieces").insert({
+    session_id: session.id,
+    format: "reel",
+    edl: {
+      segments,
+      type: pp.kind,
+      crop: {
+        mode: isMulti ? "center" : "eased",
+        start_x_frac: 0.5,
       },
-      // Null until the render stage produces the mp4 — never the poster JPG.
-      render_asset_id: null,
-      hook: String(draft.hook ?? "").slice(0, 200),
-      caption: String(draft.caption ?? "").slice(0, 2000),
-      hashtags: String(draft.hashtags ?? "").slice(0, 300),
-      cta: String(draft.cta ?? "").slice(0, 300),
-      why: String(
-        draft.why ?? "Best of the whole session in one cut."
-      ).slice(0, 500),
-      suggested_slot: String(draft.suggested_slot ?? "").slice(0, 40),
-      suggested_sound: String(draft.suggested_sound ?? "").slice(0, 120),
-      status: "ready",
-    });
-    if (insErr) throw new Error(`insert montage: ${insErr.message}`);
-    made++;
-  }
-  if (!made) throw new Error("no montage variant survived validation");
+      captions,
+      poster_asset_id: posterAsset.id,
+    },
+    // Null until the render stage produces the mp4 — never the poster JPG.
+    render_asset_id: null,
+    piece_kind: String(pp.kind).slice(0, 40),
+    director_intent: String(pp.why_this_piece || "").slice(0, 500),
+    hook: String(draft.hook ?? "").slice(0, 200),
+    caption: String(draft.caption ?? "").slice(0, 2000),
+    hashtags: String(draft.hashtags ?? "").slice(0, 300),
+    cta: String(draft.cta ?? "").slice(0, 300),
+    why: String(pp.why_this_piece ?? draft.why ?? "").slice(0, 500),
+    suggested_slot: String(draft.suggested_slot ?? "").slice(0, 40),
+    suggested_sound: String(draft.suggested_sound ?? "").slice(0, 120),
+    status: "ready",
+  });
+  if (insErr) throw new Error(`insert piece: ${insErr.message}`);
+  return true;
 }
 
 /* ——— Stage 5: render each EDL deterministically (SPEC recipe) ———

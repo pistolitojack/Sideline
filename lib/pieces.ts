@@ -33,6 +33,8 @@ type Row = {
   hashtags: string | null;
   cta: string | null;
   why: string | null;
+  piece_kind: string | null;
+  director_intent: string | null;
   suggested_slot: string | null;
   suggested_sound: string | null;
   status: string;
@@ -46,8 +48,17 @@ const TYPE_LABEL: Record<string, string> = {
   transformation: "Transformation",
   story: "Story",
   funny: "Funny",
+  funny_moment: "Funny",
   technique: "Technique",
+  single: "Clip",
+  pov: "POV",
+  testimonial: "Testimonial",
 };
+
+// A director kind we don't have a fixed label for → title-case it.
+const kindLabel = (k: string) =>
+  TYPE_LABEL[k] ||
+  (k ? k.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase()) : "Reel");
 
 export async function loadPieces(
   supabase: SupabaseClient,
@@ -56,7 +67,7 @@ export async function loadPieces(
   const { data: rows } = await supabase
     .from("content_pieces")
     .select(
-      "id, session_id, format, edl, render_asset_id, hook, caption, hashtags, cta, why, suggested_slot, suggested_sound, status, skip_reason, created_at, sessions!inner(coach_id)"
+      "id, session_id, format, edl, render_asset_id, hook, caption, hashtags, cta, why, piece_kind, director_intent, suggested_slot, suggested_sound, status, skip_reason, created_at, sessions!inner(coach_id)"
     )
     .eq("sessions.coach_id", coachId)
     .in("status", ["ready", "approved", "skipped", "downloaded"])
@@ -118,7 +129,7 @@ export async function loadPieces(
         id: r.id,
         sessionId: r.session_id,
         kind: (r.format === "story" ? "Story" : "Reel") as Piece["kind"],
-        type: TYPE_LABEL[r.edl?.type ?? ""] ?? "Teaching",
+        type: kindLabel((r.piece_kind ?? r.edl?.type ?? "").toLowerCase()),
         img,
         videoUrl,
         downloadUrl,
@@ -131,7 +142,7 @@ export async function loadPieces(
         caption: r.caption ?? "",
         tags: r.hashtags ?? "",
         cta: r.cta ?? "",
-        why: r.why ?? "",
+        why: r.director_intent ?? r.why ?? "",
         status: r.status as Piece["status"],
         skipReason: r.skip_reason,
         rendering: !isVideo, // no rendered mp4 yet → show the "Finishing edit…" overlay
