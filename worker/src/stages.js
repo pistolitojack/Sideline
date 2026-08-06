@@ -266,11 +266,15 @@ export async function direct({ session }) {
       "You are a world-class short-form video creative director for sports " +
       "coaches. You reply with exactly one JSON object and no other text.",
     content,
-    maxTokens: 2500,
+    maxTokens: 4000,
   });
   const plan = normalizePlan(extractJson(reply), assets);
 
-  await db.from("sessions").update({ plan }).eq("id", session.id);
+  const { error: planErr } = await db
+    .from("sessions")
+    .update({ plan })
+    .eq("id", session.id);
+  if (planErr) throw new Error(`save plan: ${planErr.message}`);
 
   // Tag each asset with the cluster the director assigned it.
   const clusterOf = {};
@@ -279,11 +283,13 @@ export async function direct({ session }) {
       clusterOf[vid] = { id: c.cluster_id, label: c.label };
   for (const a of assets) {
     const c = clusterOf[a.id];
-    if (c)
-      await db
+    if (c) {
+      const { error: tagErr } = await db
         .from("media_assets")
         .update({ cluster_id: c.id, cluster_label: c.label })
         .eq("id", a.id);
+      if (tagErr) console.warn(`  cluster tag failed ${a.id}: ${tagErr.message}`);
+    }
   }
 
   console.log(
