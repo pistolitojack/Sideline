@@ -35,6 +35,7 @@ type Row = {
   why: string | null;
   piece_kind: string | null;
   director_intent: string | null;
+  revision_history: { note: string; at: string }[] | null;
   suggested_slot: string | null;
   suggested_sound: string | null;
   status: string;
@@ -67,7 +68,7 @@ export async function loadPieces(
   const { data: rows } = await supabase
     .from("content_pieces")
     .select(
-      "id, session_id, format, edl, render_asset_id, hook, caption, hashtags, cta, why, piece_kind, director_intent, suggested_slot, suggested_sound, status, skip_reason, created_at, sessions!inner(coach_id)"
+      "id, session_id, format, edl, render_asset_id, hook, caption, hashtags, cta, why, piece_kind, director_intent, revision_history, suggested_slot, suggested_sound, status, skip_reason, created_at, sessions!inner(coach_id)"
     )
     .eq("sessions.coach_id", coachId)
     .in("status", ["ready", "approved", "skipped", "downloaded"])
@@ -146,6 +147,7 @@ export async function loadPieces(
         status: r.status as Piece["status"],
         skipReason: r.skip_reason,
         rendering: !isVideo, // no rendered mp4 yet → show the "Finishing edit…" overlay
+        revisions: Array.isArray(r.revision_history) ? r.revision_history : [],
       };
     })
   );

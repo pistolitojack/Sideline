@@ -773,15 +773,41 @@ export default function Today({
                 </button>
                 {typeof selPiece.id === "string" && (
                   <>
+                    {selPiece.revisions && selPiece.revisions.length > 0 && (
+                      <div style={{ marginTop: 12 }}>
+                        <p
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 700,
+                            letterSpacing: "0.08em",
+                            color: BASE.muted,
+                            textTransform: "uppercase",
+                          }}
+                        >
+                          Changes you&apos;ve asked for
+                        </p>
+                        {selPiece.revisions.map((rev, i) => (
+                          <p
+                            key={i}
+                            style={{
+                              fontSize: 12.5,
+                              color: BASE.ink,
+                              marginTop: 5,
+                              lineHeight: 1.4,
+                            }}
+                          >
+                            &ldquo;{rev.note}&rdquo;
+                          </p>
+                        ))}
+                      </div>
+                    )}
                     <textarea
                       value={reviseNote}
                       onChange={(e) =>
                         setReviseNote(e.target.value.slice(0, 600))
                       }
                       rows={2}
-                      placeholder={
-                        'Ask for changes: "trim the intro", "new hook", "remove the last clip"\u2026'
-                      }
+                      placeholder="Tell your employee what to change."
                       style={{
                         fontSize: 13,
                         color: BASE.ink,

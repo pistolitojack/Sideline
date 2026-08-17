@@ -25,6 +25,7 @@ export type Piece = {
   status: PieceStatus;
   skipReason?: string | null;
   rendering?: boolean; // video not rendered yet (render_asset_id is null)
+  revisions?: { note: string; at: string }[]; // what the coach has asked to change
 };
 
 export type Coach = {

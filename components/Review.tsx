@@ -545,6 +545,34 @@ function SwipeCard({
             )}
             {typeof piece.id === "string" && (
               <div style={{ marginTop: 14 }}>
+                {piece.revisions && piece.revisions.length > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <p
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        letterSpacing: "0.08em",
+                        color: BASE.muted,
+                        textTransform: "uppercase",
+                      }}
+                    >
+                      Changes you&apos;ve asked for
+                    </p>
+                    {piece.revisions.map((rev, i) => (
+                      <p
+                        key={i}
+                        style={{
+                          fontSize: 12.5,
+                          color: BASE.ink,
+                          marginTop: 5,
+                          lineHeight: 1.4,
+                        }}
+                      >
+                        &ldquo;{rev.note}&rdquo;
+                      </p>
+                    ))}
+                  </div>
+                )}
                 <p
                   style={{
                     fontSize: 10,
@@ -560,9 +588,7 @@ function SwipeCard({
                   value={note}
                   onChange={(e) => setNote(e.target.value.slice(0, 600))}
                   rows={2}
-                  placeholder={
-                    '"Trim the first 3 seconds", "punchier hook", "remove the last clip", "make it faster"\u2026'
-                  }
+                  placeholder="Tell your employee what to change."
                   style={{
                     fontSize: 13.5,
                     color: BASE.ink,

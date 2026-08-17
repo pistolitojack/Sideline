@@ -1,6 +1,18 @@
 # Sideline — Build Progress
 
-## Phase 2 — The AI director (in progress)
+## Phase 2 — The AI director ✅ complete
+
+- **2.5 Natural-language revision loop** ✅ — the revise stage now works like
+  a real editor: it samples frames of the piece's source clips (director-style
+  vision), reads the current piece (edl, kind, intent, copy) and the coach's
+  free-text note, and asks Claude to re-cut + rewrite honoring ANY plain
+  request ("cut faster", "start on the payoff", "less hype more teaching"),
+  then re-renders just that piece and regenerates its poster (the opening may
+  have moved). Every request is appended to `content_pieces.revision_history`
+  (migration `supabase/v8-revision-history.sql`), and the Review + Today
+  detail sheets show a "Changes you've asked for" list. The "Ask for changes"
+  box now reads "Tell your employee what to change."
+
 
 - **2.4 Renderer handles the plan's recipes** ✅ — the render stage was
   already fully segment-based (it builds from `edl.segments` for any piece,
