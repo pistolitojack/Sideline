@@ -2,6 +2,19 @@
 
 ## Phase 2 — The AI director (in progress)
 
+- **2.4 Renderer handles the plan's recipes** ✅ — the render stage was
+  already fully segment-based (it builds from `edl.segments` for any piece,
+  or a single `{asset_id,in,out}` cut), downloads each distinct source once,
+  normalizes every segment to 1080x1920, then takes a single-clip fast path
+  or an xfade/acrossfade chain with per-segment transitions. No montage-only
+  branch — 2.3's composer emits that same shape for every planned piece, so
+  single-clip and multi-clip (across multiple source assets) both render.
+  Hardening added: the crossfade duration is clamped to half of each adjacent
+  segment, so any recipe or revision with short beats joins cleanly instead of
+  erroring. The recipe stays intent-only — the composer translates it into
+  concrete segments; the renderer never parses it.
+
+
 - **2.3 Compose follows the plan** ✅ built — `compose()` no longer decides
   what to make. It reads `sessions.plan.planned_pieces` and produces one
   content piece per planned piece: it gathers the moments from that piece's

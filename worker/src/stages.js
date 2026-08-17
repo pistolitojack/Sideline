@@ -948,8 +948,15 @@ export async function render({ session }) {
         let vPrev = "0:v";
         let aPrev = "0:a";
         for (let i = 1; i < segFiles.length; i++) {
-          const [type, fd] =
+          const [type, baseFd] =
             XFADE[segments[i - 1].transition] ?? XFADE.fade;
+          // A crossfade can't be longer than the clips it joins — clamp it to
+          // half of each adjacent segment so any recipe (short beats, revised
+          // cuts) joins cleanly instead of erroring.
+          const fd = Math.max(
+            0.05,
+            Math.min(baseFd, durs[i - 1] / 2, durs[i] / 2)
+          );
           const offset = Math.max(0, acc - fd).toFixed(3);
           graph.push(
             `[${vPrev}][${i}:v]xfade=transition=${type}:duration=${fd}:offset=${offset}[v${i}]`
