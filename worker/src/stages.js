@@ -1039,237 +1039,249 @@ export async function revise({ session }) {
 
   for (const piece of pieces) {
     const note = String(piece.revision_note).slice(0, 600);
-
-    // Which source clips does this piece use? Show Claude a few frames of each
-    // so it re-edits with real eyes on the footage (director-style vision).
-    const usedIds = [];
-    const segs0 = piece.edl?.segments?.length
-      ? piece.edl.segments
-      : [{ asset_id: piece.edl?.asset_id }];
-    for (const s of segs0)
-      if (s?.asset_id && byId[s.asset_id] && !usedIds.includes(s.asset_id))
-        usedIds.push(s.asset_id);
-    if (!usedIds.length) usedIds.push(...assets.map((a) => a.id).slice(0, 3));
-
-    const content = [
-      {
-        type: "text",
-        text:
-          "You are the coach's video editor. Apply the coach's revision to the " +
-          "existing piece below. Study the frames of the source clips first, " +
-          "then re-cut and rewrite ONLY as much as the request needs.",
-      },
-    ];
-    for (const aid of usedIds.slice(0, 4)) {
-      const a = byId[aid];
-      await withTmp(async (dir) => {
-        const local = await downloadTo(a.storage_path, join(dir, "in.mp4"));
-        const frames = await sampleFrames(local, a.duration_sec, dir, 3);
-        content.push({
-          type: "text",
-          text: `SOURCE ${aid} — ${Math.round(a.duration_sec ?? 0)}s · ${
-            (a.width ?? 0) > (a.height ?? 0) ? "landscape" : "vertical"
-          }`,
-        });
-        for (const f of frames) {
-          content.push({ type: "text", text: `  frame at t=${f.t}s:` });
-          content.push(await imageBlock(f.path));
-        }
-      });
-    }
-
-    content.push({
-      type: "text",
-      text: [
-        `Coach: ${coach.name}; sport=${coach.sport}; tones=${(
-          coach.tones ?? []
-        ).join(", ")}; mission=${coach.mission}.`,
-        coach.voice_memo_transcript
-          ? `Voice sample (STYLE ONLY — copy tone/rhythm, never its topic): "${coach.voice_memo_transcript.slice(
-              0,
-              700
-            )}"`
-          : ``,
-        ``,
-        `THE CURRENT PIECE — kind=${
-          piece.piece_kind ?? piece.edl?.type ?? "reel"
-        }; why it exists: ${piece.director_intent ?? piece.why ?? ""}`,
-        JSON.stringify(
-          {
-            edl: piece.edl,
-            hook: piece.hook,
-            caption: piece.caption,
-            hashtags: piece.hashtags,
-            cta: piece.cta,
-          },
-          null,
-          1
-        ),
-        ``,
-        `THE COACH'S REVISION REQUEST — plain English, honor it exactly. It may`,
-        `ask to re-cut, reorder, change pacing or length, or change the tone/feel.`,
-        `Change nothing they didn't ask about:`,
-        `"${note}"`,
-        ``,
-        `Rules: cuts may move anywhere inside the source durations. Reels max 60s,`,
-        `stories max 15s. A single clean cut is ONE segment; multi-clip segments`,
-        `run 1-6s each with a "transition" per segment`,
-        `(cut|fade|slideleft|slideright|circleopen). Caption beats stay inside the`,
-        `cut (t=0 = start).`,
-        ``,
-        `Return ONLY this JSON object:`,
-        `{"edl": {"segments": [{"asset_id": "...", "in": 0, "out": 3, "transition": "cut"}],`,
-        `  "crop": {"mode": "center|eased", "start_x_frac": 0.5},`,
-        `  "captions": [{"text": "...", "t0": 0, "t1": 2.4, "style": "hook|body"}]},`,
-        ` "hook": "...", "caption": "...", "hashtags": "...", "cta": "...",`,
-        ` "why": "one sentence on what you changed"}`,
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    });
-
-    const reply = await askClaude({
-      system:
-        "You are a precise short-form video editor. You apply the coach's notes faithfully with real eyes on the footage, and reply with exactly one valid JSON object.",
-      content,
-      maxTokens: 4000,
-    });
-    const draft = extractJson(reply);
-
-    // Normalize + clamp the revised cut.
-    const maxLen = piece.format === "story" ? 15 : 60;
-    const rawSegs = draft.edl?.segments?.length
-      ? draft.edl.segments
-      : [
-          {
-            asset_id: draft.edl?.asset_id,
-            in: draft.edl?.in,
-            out: draft.edl?.out,
-          },
-        ];
-    let total = 0;
-    const segments = rawSegs
-      .map((seg) => {
-        const asset =
-          byId[seg.asset_id] ?? byId[piece.edl?.asset_id] ?? byId[usedIds[0]];
-        if (!asset) return null;
-        const hi = asset.duration_sec ?? Number(seg.out);
-        const start = Math.max(0, Math.min(Number(seg.in) || 0, hi - 1));
-        const end = Math.min(
-          hi,
-          Math.max(start + 1, Number(seg.out) || start + 1)
-        );
-        if (!(end - start >= 1)) return null;
-        return {
-          asset_id: asset.id,
-          in: start,
-          out: end,
-          transition: TRANSITIONS.includes(seg.transition)
-            ? seg.transition
-            : "cut",
-        };
-      })
-      .filter(Boolean)
-      .filter((seg) => {
-        if (total >= maxLen) return false;
-        total += seg.out - seg.in;
-        return true;
-      });
-
     const history = Array.isArray(piece.revision_history)
       ? piece.revision_history
       : [];
-    const newHistory = [
-      ...history,
-      { note, at: new Date().toISOString() },
-    ].slice(-12);
+    try {
+      // Which source clips does this piece use? Show Claude a few frames of
+      // each so it re-edits with real eyes on the footage (director vision).
+      const usedIds = [];
+      const segs0 = piece.edl?.segments?.length
+        ? piece.edl.segments
+        : [{ asset_id: piece.edl?.asset_id }];
+      for (const s of segs0)
+        if (s?.asset_id && byId[s.asset_id] && !usedIds.includes(s.asset_id))
+          usedIds.push(s.asset_id);
+      if (!usedIds.length) usedIds.push(...assets.map((a) => a.id).slice(0, 3));
 
-    if (!segments.length) {
-      console.warn(
-        `revision for piece ${piece.id} produced no usable cut — skipped`
-      );
-      await db
+      const content = [
+        {
+          type: "text",
+          text:
+            "You are the coach's video editor. Apply the coach's revision to " +
+            "the existing piece below. Study the frames of the source clips " +
+            "first, then re-cut and rewrite ONLY as much as the request needs.",
+        },
+      ];
+      for (const aid of usedIds.slice(0, 4)) {
+        const a = byId[aid];
+        await withTmp(async (dir) => {
+          const local = await downloadTo(a.storage_path, join(dir, "in.mp4"));
+          const frames = await sampleFrames(local, a.duration_sec, dir, 3);
+          content.push({
+            type: "text",
+            text: `SOURCE ${aid} — ${Math.round(a.duration_sec ?? 0)}s · ${
+              (a.width ?? 0) > (a.height ?? 0) ? "landscape" : "vertical"
+            }`,
+          });
+          for (const f of frames) {
+            content.push({ type: "text", text: `  frame at t=${f.t}s:` });
+            content.push(await imageBlock(f.path));
+          }
+        });
+      }
+
+      content.push({
+        type: "text",
+        text: [
+          `Coach: ${coach.name}; sport=${coach.sport}; tones=${(
+            coach.tones ?? []
+          ).join(", ")}; mission=${coach.mission}.`,
+          coach.voice_memo_transcript
+            ? `Voice sample (STYLE ONLY — copy tone/rhythm, never its topic): "${coach.voice_memo_transcript.slice(
+                0,
+                700
+              )}"`
+            : ``,
+          ``,
+          `THE CURRENT PIECE — kind=${
+            piece.piece_kind ?? piece.edl?.type ?? "reel"
+          }; why it exists: ${piece.director_intent ?? piece.why ?? ""}`,
+          JSON.stringify(
+            {
+              edl: piece.edl,
+              hook: piece.hook,
+              caption: piece.caption,
+              hashtags: piece.hashtags,
+              cta: piece.cta,
+            },
+            null,
+            1
+          ),
+          ``,
+          `THE COACH'S REVISION REQUEST — plain English, honor it exactly. It`,
+          `may ask to re-cut, reorder, change pacing or length, or change the`,
+          `tone/feel. Change nothing they didn't ask about:`,
+          `"${note}"`,
+          ``,
+          `Rules: cuts may move anywhere inside the source durations. Reels max`,
+          `60s, stories max 15s. A single clean cut is ONE segment; multi-clip`,
+          `segments run 1-6s each with a "transition" per segment`,
+          `(cut|fade|slideleft|slideright|circleopen). Caption beats stay inside`,
+          `the cut (t=0 = start).`,
+          ``,
+          `Return ONLY this JSON object:`,
+          `{"edl": {"segments": [{"asset_id": "...", "in": 0, "out": 3, "transition": "cut"}],`,
+          `  "crop": {"mode": "center|eased", "start_x_frac": 0.5},`,
+          `  "captions": [{"text": "...", "t0": 0, "t1": 2.4, "style": "hook|body"}]},`,
+          ` "hook": "...", "caption": "...", "hashtags": "...", "cta": "...",`,
+          ` "why": "one sentence on what you changed"}`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      });
+
+      const reply = await askClaude({
+        system:
+          "You are a precise short-form video editor. You apply the coach's notes faithfully with real eyes on the footage, and reply with exactly one valid JSON object.",
+        content,
+        maxTokens: 4000,
+      });
+      const draft = extractJson(reply);
+
+      // Normalize + clamp the revised cut.
+      const maxLen = piece.format === "story" ? 15 : 60;
+      const rawSegs = draft.edl?.segments?.length
+        ? draft.edl.segments
+        : [
+            {
+              asset_id: draft.edl?.asset_id,
+              in: draft.edl?.in,
+              out: draft.edl?.out,
+            },
+          ];
+      let total = 0;
+      const segments = rawSegs
+        .map((seg) => {
+          const asset =
+            byId[seg.asset_id] ?? byId[piece.edl?.asset_id] ?? byId[usedIds[0]];
+          if (!asset) return null;
+          const hi = asset.duration_sec ?? Number(seg.out);
+          const start = Math.max(0, Math.min(Number(seg.in) || 0, hi - 1));
+          const end = Math.min(
+            hi,
+            Math.max(start + 1, Number(seg.out) || start + 1)
+          );
+          if (!(end - start >= 1)) return null;
+          return {
+            asset_id: asset.id,
+            in: start,
+            out: end,
+            transition: TRANSITIONS.includes(seg.transition)
+              ? seg.transition
+              : "cut",
+          };
+        })
+        .filter(Boolean)
+        .filter((seg) => {
+          if (total >= maxLen) return false;
+          total += seg.out - seg.in;
+          return true;
+        });
+
+      const newHistory = [
+        ...history,
+        { note, at: new Date().toISOString() },
+      ].slice(-12);
+
+      if (!segments.length) {
+        console.warn(
+          `revision for piece ${piece.id} produced no usable cut — skipped`
+        );
+        await db
+          .from("content_pieces")
+          .update({
+            revision_note: null,
+            status: "ready",
+            revision_history: newHistory,
+          })
+          .eq("id", piece.id);
+        continue;
+      }
+
+      const captions = (draft.edl?.captions ?? [])
+        .filter((c) => c.text)
+        .map((c) => ({
+          text: String(c.text).slice(0, 80),
+          t0: Math.max(0, Math.min(Number(c.t0) || 0, total)),
+          t1: Math.max(0, Math.min(Number(c.t1) || 0, total)),
+          style: c.style === "hook" ? "hook" : "body",
+        }))
+        .filter((c) => c.t1 > c.t0);
+
+      // Fresh poster from the new opening (the cut may have moved).
+      const first = segments[0];
+      const firstAsset = byId[first.asset_id];
+      const folder = firstAsset.storage_path.split("/").slice(0, 2).join("/");
+      const posterStorage = `${folder}/posters/${piece.id}-rev${newHistory.length}.jpg`;
+      let posterAssetId = piece.edl?.poster_asset_id;
+      try {
+        await withTmp(async (dir) => {
+          const local = await downloadTo(
+            firstAsset.storage_path,
+            join(dir, "in.mp4")
+          );
+          const poster = await posterFrame(
+            local,
+            first.in + (first.out - first.in) / 2,
+            join(dir, "poster.jpg")
+          );
+          await uploadFrom(poster, posterStorage, "image/jpeg");
+        });
+        const { data: pa } = await db
+          .from("media_assets")
+          .insert({
+            session_id: session.id,
+            storage_path: posterStorage,
+            kind: "render",
+          })
+          .select("id")
+          .single();
+        if (pa) posterAssetId = pa.id;
+      } catch (e) {
+        console.warn(`  revise poster failed ${piece.id}: ${e.message}`);
+      }
+
+      const newEdl = {
+        segments,
+        type: piece.edl?.type,
+        poster_asset_id: posterAssetId,
+        crop: {
+          mode: draft.edl?.crop?.mode === "eased" ? "eased" : "center",
+          start_x_frac: Number(draft.edl?.crop?.start_x_frac ?? 0.5),
+        },
+        captions,
+      };
+
+      const { error: upErr } = await db
         .from("content_pieces")
         .update({
+          edl: newEdl,
+          hook: String(draft.hook ?? piece.hook ?? "").slice(0, 200),
+          caption: String(draft.caption ?? piece.caption ?? "").slice(0, 2000),
+          hashtags: String(draft.hashtags ?? piece.hashtags ?? "").slice(
+            0,
+            300
+          ),
+          cta: String(draft.cta ?? piece.cta ?? "").slice(0, 300),
+          why: String(draft.why ?? "Revised per your note.").slice(0, 500),
+          status: "rendering",
+          render_asset_id: null,
           revision_note: null,
-          status: "ready",
           revision_history: newHistory,
         })
         .eq("id", piece.id);
-      continue;
-    }
-
-    const captions = (draft.edl?.captions ?? [])
-      .filter((c) => c.text)
-      .map((c) => ({
-        text: String(c.text).slice(0, 80),
-        t0: Math.max(0, Math.min(Number(c.t0) || 0, total)),
-        t1: Math.max(0, Math.min(Number(c.t1) || 0, total)),
-        style: c.style === "hook" ? "hook" : "body",
-      }))
-      .filter((c) => c.t1 > c.t0);
-
-    // Fresh poster from the new opening (the cut may have moved).
-    const first = segments[0];
-    const firstAsset = byId[first.asset_id];
-    const folder = firstAsset.storage_path.split("/").slice(0, 2).join("/");
-    const posterStorage = `${folder}/posters/${piece.id}-rev${newHistory.length}.jpg`;
-    let posterAssetId = piece.edl?.poster_asset_id;
-    try {
-      await withTmp(async (dir) => {
-        const local = await downloadTo(
-          firstAsset.storage_path,
-          join(dir, "in.mp4")
-        );
-        const poster = await posterFrame(
-          local,
-          first.in + (first.out - first.in) / 2,
-          join(dir, "poster.jpg")
-        );
-        await uploadFrom(poster, posterStorage, "image/jpeg");
-      });
-      const { data: pa } = await db
-        .from("media_assets")
-        .insert({
-          session_id: session.id,
-          storage_path: posterStorage,
-          kind: "render",
-        })
-        .select("id")
-        .single();
-      if (pa) posterAssetId = pa.id;
+      if (upErr) throw new Error(`apply revision: ${upErr.message}`);
+      console.log(`  revised piece ${piece.id}`);
     } catch (e) {
-      console.warn(`  revise poster failed ${piece.id}: ${e.message}`);
+      // Most common cause: the original footage was already cleaned up, so we
+      // can't re-cut. Never leave the piece stuck — restore it unchanged.
+      console.warn(`  revise piece ${piece.id} skipped: ${e.message}`);
+      await db
+        .from("content_pieces")
+        .update({ status: "ready", revision_note: null })
+        .eq("id", piece.id);
     }
-
-    const newEdl = {
-      segments,
-      type: piece.edl?.type,
-      poster_asset_id: posterAssetId,
-      crop: {
-        mode: draft.edl?.crop?.mode === "eased" ? "eased" : "center",
-        start_x_frac: Number(draft.edl?.crop?.start_x_frac ?? 0.5),
-      },
-      captions,
-    };
-
-    const { error: upErr } = await db
-      .from("content_pieces")
-      .update({
-        edl: newEdl,
-        hook: String(draft.hook ?? piece.hook ?? "").slice(0, 200),
-        caption: String(draft.caption ?? piece.caption ?? "").slice(0, 2000),
-        hashtags: String(draft.hashtags ?? piece.hashtags ?? "").slice(0, 300),
-        cta: String(draft.cta ?? piece.cta ?? "").slice(0, 300),
-        why: String(draft.why ?? "Revised per your note.").slice(0, 500),
-        status: "rendering",
-        render_asset_id: null,
-        revision_note: null,
-        revision_history: newHistory,
-      })
-      .eq("id", piece.id);
-    if (upErr) throw new Error(`apply revision: ${upErr.message}`);
-    console.log(`  revised piece ${piece.id}`);
   }
 
   return "render";
@@ -1330,10 +1342,12 @@ export async function cleanup() {
   }
 
   // Original raw videos of OLD finished sessions — the biggest storage hog.
-  // After a few days the coach won't be revising that session, so the source
-  // footage is safe to purge. The finished reels (renders + posters) are
-  // separate files and are left untouched.
-  const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+  // Kept 30 days so revisions (which need the source footage) work for a
+  // month; after that the source is purged. The finished reels (renders +
+  // posters) are separate files and are left untouched.
+  const cutoff = new Date(
+    Date.now() - 30 * 24 * 60 * 60 * 1000
+  ).toISOString();
   const { data: oldDone } = await db
     .from("sessions")
     .select("id")
