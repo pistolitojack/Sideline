@@ -759,9 +759,25 @@ async function composePlannedPiece({
    and burns captions, fades, and loudness normalization. */
 const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
+// The burn-in font (DejaVu Sans Bold) has no emoji/pictograph glyphs, and
+// drawtext renders any missing glyph as a "tofu" box (□). Social copy ends
+// sentences with emoji constantly, so strip anything the font can't draw
+// before it reaches the video. Normal punctuation, curly quotes, em dashes
+// and accented Latin all survive.
+function sanitizeForBurn(text) {
+  return String(text)
+    .replace(
+      /[\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}\u{2300}-\u{23FF}\u{2500}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{200D}]/gu,
+      ""
+    )
+    .replace(/\s+([,.!?;:])/g, "$1") // no space left dangling before punctuation
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 // drawtext has no auto-wrap: break captions into up to 3 fitted lines.
 function wrapText(text, maxChars) {
-  const words = String(text).trim().split(/\s+/);
+  const words = sanitizeForBurn(text).split(/\s+/).filter(Boolean);
   const lines = [];
   let line = "";
   for (const w of words) {

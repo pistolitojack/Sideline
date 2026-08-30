@@ -20,3 +20,19 @@ Good ideas that are NOT in SPEC.md for V1. Logged here instead of built.
 - Per-content-piece "render failed" state: today a failed render leaves a
   piece on the "Finishing edit…" overlay (session still shows failed). An
   explicit failed badge on the piece would make it unambiguous.
+
+## From Jack's Phase 3 baseline review (all Phase C — do NOT build in Phase 3)
+
+- **Per-kind caption typography.** Every piece currently burns the same font,
+  size, and placement, so a pack looks visually identical even when the content
+  differs. Jack: "always the same style of lettering — maybe if it's hype have a
+  different font." Give each piece kind its own type treatment (hype = heavy
+  condensed/impact, teaching = clean readable, story = softer) so the pack looks
+  as varied as it reads.
+- **Cuts that land on the movement.** Jack: "we can work a lot on transitions
+  and when it cuts — knowing when they do an exercise or a move." Cuts should
+  land on the actual rep/impact/landing, not arbitrary timestamps. (Phase 3
+  item 7's motion-adaptive sampling is the perception half of this; the
+  cut-placement half is the Phase C rhythm engine.)
+- **Transition variety tied to piece kind** — hype gets hard cuts on impact,
+  story gets softer dissolves.

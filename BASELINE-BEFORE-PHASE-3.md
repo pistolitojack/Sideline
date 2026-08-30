@@ -132,9 +132,41 @@ These are concrete, checkable patterns in the baseline — not opinions:
 
 ## 6. Coach's feel note (Jack)
 
-_Pending — to be appended._
+Captured verbatim in substance — this is the human half of the baseline.
 
-1. Best piece (would post as-is):
-2. Weakest piece and why:
-3. Varied or samey:
-4. Sounds like me, or generic:
+**What's working (keep this):**
+- "The director reads very well what the video is doing — that is a big plus."
+- "It has its own mind and came back with three different videos."
+- "The prompts are good in my opinion."
+- "The captions are great!"
+- **"I would still post the videos it generated me."** ← the bar we're building on.
+
+**What needs to improve:**
+1. **Visual sameness — every piece looks the same.** "The writing and the way the
+   letters show up are always the same… the style, always the same style of
+   lettering." Wants typography that changes with the piece: "maybe if it's hype
+   have a different font for the lettering."
+2. **BUG: a square renders at the end of sentences.** "It always shows up with a
+   square at the end of sentences." A tofu box = a character the burned-in
+   caption font can't render (most likely an emoji or unusual unicode reaching
+   drawtext). Affects every video.
+3. **Cut timing and transitions.** "We can work a lot on transitions and when it
+   cuts — knowing when they do an exercise or a move." Cuts should land on the
+   actual movement, not arbitrary times.
+
+**The north star he restated (quote):**
+> "The important thing is that the AI learns off what the coach requests in
+> changes, learns his style, learns how content is made, and that it has the
+> mind and intelligence and option to be able to make the same changes you can
+> in Instagram or TikTok by just being able to prompt or talk to the AI."
+
+**Framing:** "It's a very strong base — I don't want you to think it's negative,
+just improvements of what we have."
+
+**Where each item lands:**
+- Learning from revisions/style/history → **Phase 3 items 6 & 8** (memory
+  injection + self-reflection).
+- Cuts landing on the actual movement → **Phase 3 item 7** (motion-adaptive
+  frame sampling).
+- Per-kind typography / visual variety → **Phase C** (logged in IDEAS.md).
+- The square/tofu bug → **defect, fix outside the phase order.**
