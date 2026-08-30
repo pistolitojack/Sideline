@@ -579,17 +579,25 @@ async function composePlannedPiece({
   pp,
   clusterAssets,
 }) {
-  // Which moments may this piece draw from?
-  let pool = allMoments;
+  // Every piece in a session shares the SAME stable prefix: coach profile, the
+  // full moment list, the build rules, and the output schema. Only the
+  // director's per-piece brief changes. That keeps the cached block identical
+  // across the 3-5 compose calls AND large enough to clear Anthropic's ~1k
+  // token cache minimum, so pieces 2+ read the prefix back instead of
+  // re-billing it.
+  const pool = allMoments.slice(0, 16);
+  if (!pool.length) return false;
+
+  // Which of those moments did the director assign to THIS piece?
+  const allowedIdx = [];
   if (pp.cluster_ids_to_use?.length) {
     const allowed = new Set();
     for (const cid of pp.cluster_ids_to_use)
       for (const aid of clusterAssets[cid] ?? []) allowed.add(aid);
-    const filtered = allMoments.filter((m) => allowed.has(m.asset_id));
-    if (filtered.length) pool = filtered;
+    pool.forEach((m, i) => {
+      if (allowed.has(m.asset_id)) allowedIdx.push(i);
+    });
   }
-  pool = pool.slice(0, 16);
-  if (!pool.length) return false;
 
   const momentList = pool
     .map((m, i) => {
@@ -608,11 +616,8 @@ async function composePlannedPiece({
   const multi = String(pp.kind) !== "single";
   const target = clampNum(Number(pp.target_length_sec), 8, 60, 25);
 
-  // The coach preamble is byte-identical for every piece in this session, so
-  // it's sent as its own cached block: piece 1 writes the cache, pieces 2-5
-  // read it back cheaply instead of re-billing the whole profile each time.
-  const coachPreamble = [
-    `You are the coach's editor + ghostwriter. Build the ONE piece the DIRECTOR asked for below.`,
+  const stablePrefix = [
+    `You are the coach's editor + ghostwriter. You build ONE piece at a time, exactly as the DIRECTOR briefs you.`,
     `Coach: name=${coach.name}; sport=${coach.sport}; tones=${(
       coach.tones ?? []
     ).join(", ")}; audience=${coach.audience}; mission=${coach.mission}.`,
@@ -625,28 +630,21 @@ async function composePlannedPiece({
     coach.ig_profile
       ? `Their real Instagram vibe: ${String(coach.ig_profile).slice(0, 1200)}`
       : ``,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const prompt = [
-    `THE DIRECTOR'S BRIEF FOR THIS PIECE (follow it):`,
-    `- kind: ${pp.kind}`,
-    `- why it exists (keep this intent alive in the copy): ${pp.why_this_piece}`,
-    `- target length: ~${target}s`,
-    `- structural recipe to realize: ${pp.structural_recipe}`,
     ``,
-    `Available moments — pick sub-ranges from INSIDE these (use the index numbers):`,
+    `EVERY MOMENT FOUND IN THIS SESSION — pick sub-ranges from INSIDE these, by index:`,
     momentList,
     ``,
-    multi
-      ? `Build ${
-          target < 20 ? "3-6" : "5-10"
-        } segments across the moments that realize the recipe. Each segment names the transition INTO the next: "cut" (hard cut, default), "fade" (mood shift), "slideleft"/"slideright" (whip to new angle), "circleopen" (reveal). Mostly cuts and fades; at most 1-2 specialty wipes.`
-      : `Build exactly ONE segment — a single clean cut that realizes the recipe (hook early, land the payoff).`,
-    `Aim for ~${target}s total, never over 60s. Multi-clip segments run 1-6s each; a single cut may run longer.`,
-    `Write the copy in the coach's voice, shaped by the kind and the intent above.`,
-    `Caption beats land inside the cut (t=0 = cut start): a hook beat in the first 2-3s, then 1-3 body beats.`,
+    `HOW TO BUILD ANY PIECE:`,
+    `- Each segment names the transition INTO the next: "cut" (hard cut,`,
+    `  default), "fade" (mood shift), "slideleft"/"slideright" (whip to a new`,
+    `  angle), "circleopen" (reveal). Mostly cuts and fades; at most 1-2`,
+    `  specialty wipes.`,
+    `- Multi-clip segments run 1-6s each; a single cut may run longer. Never`,
+    `  over 60s total.`,
+    `- Write the copy in the coach's voice, shaped by the piece's kind and the`,
+    `  intent behind it.`,
+    `- Caption beats land inside the cut (t=0 = cut start): a hook beat in the`,
+    `  first 2-3s, then 1-3 body beats.`,
     ``,
     `Return ONLY one JSON object:`,
     `{"segments": [{"moment_index": 0, "in": <abs s>, "out": <abs s>, "transition": "cut"}],`,
@@ -658,15 +656,42 @@ async function composePlannedPiece({
     .filter(Boolean)
     .join("\n");
 
+  const pieceBrief = [
+    `THE DIRECTOR'S BRIEF FOR THIS PIECE (follow it):`,
+    `- kind: ${pp.kind}`,
+    `- why it exists (keep this intent alive in the copy): ${pp.why_this_piece}`,
+    `- target length: ~${target}s`,
+    `- structural recipe to realize: ${pp.structural_recipe}`,
+    allowedIdx.length
+      ? `- the director assigned this piece these moment indexes: ${allowedIdx.join(
+          ", "
+        )} — build from those unless the recipe clearly calls for another.`
+      : `- any moment listed above may be used.`,
+    ``,
+    multi
+      ? `Build ${
+          target < 20 ? "3-6" : "5-10"
+        } segments that realize the recipe.`
+      : `Build exactly ONE segment — a single clean cut that realizes the recipe (hook early, land the payoff).`,
+    `Aim for ~${target}s total.`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
   const reply = await askClaude({
     system:
       "You are an elite short-form sports video editor and ghostwriter. You realize the director's recipe precisely and reply with exactly one valid JSON object.",
     content: [
-      cacheable({ type: "text", text: coachPreamble }),
-      { type: "text", text: prompt },
+      cacheable({ type: "text", text: stablePrefix }),
+      { type: "text", text: pieceBrief },
     ],
     maxTokens: 3000,
-    label: `compose ${pp.piece_id}`,
+    // The rough prefix size rides along in the label: if caching ever stops
+    // engaging, this says immediately whether the block fell under the ~1k
+    // token minimum.
+    label: `compose ${pp.piece_id} (prefix~${Math.round(
+      stablePrefix.length / 4
+    )}t)`,
   });
   const draft = extractJson(reply);
 
