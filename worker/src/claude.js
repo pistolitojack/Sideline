@@ -6,13 +6,43 @@ export const MODEL = "claude-sonnet-4-6";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-export async function askClaude({ system, content, maxTokens = 4000 }) {
+// Mark the LAST block of a stable prefix (coach profile, sampled frames, voice
+// memo, IG summary). Everything up to and including that block is cached by
+// Anthropic and re-read cheaply by later calls sharing the same prefix.
+// Caching only engages above a minimum prefix size (~1k tokens), which is why
+// we mark image-heavy and profile blocks rather than short instructions.
+export function cacheable(block) {
+  return { ...block, cache_control: { type: "ephemeral" } };
+}
+
+export async function askClaude({
+  system,
+  content,
+  maxTokens = 4000,
+  label = "claude",
+}) {
+  // A string system prompt becomes a cached text block so it never re-bills.
+  const sys =
+    typeof system === "string"
+      ? [{ type: "text", text: system, cache_control: { type: "ephemeral" } }]
+      : system;
+
   const res = await client.messages.create({
     model: MODEL,
     max_tokens: maxTokens,
-    system,
+    system: sys,
     messages: [{ role: "user", content }],
   });
+
+  const u = res.usage ?? {};
+  const write = u.cache_creation_input_tokens ?? 0;
+  const read = u.cache_read_input_tokens ?? 0;
+  console.log(
+    `  [tokens] ${label}: in=${u.input_tokens ?? 0} cache_write=${write} ` +
+      `cache_read=${read} out=${u.output_tokens ?? 0}` +
+      (read > 0 ? "  <- cache HIT" : "")
+  );
+
   return res.content
     .filter((b) => b.type === "text")
     .map((b) => b.text)

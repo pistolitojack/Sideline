@@ -19,7 +19,7 @@ import {
   posterFrame,
   ffmpegRun,
 } from "./ffmpeg.js";
-import { askClaude, imageBlock, extractJson } from "./claude.js";
+import { askClaude, imageBlock, extractJson, cacheable } from "./claude.js";
 
 const MOMENT_TYPES = [
   "teaching",
@@ -235,19 +235,23 @@ export async function direct({ session }) {
     });
   }
 
-  content.push({
-    type: "text",
-    text: [
-      "THE COACH:",
-      `- sport / focus: ${coach.sport ?? "?"}`,
-      `- audience: ${coach.audience ?? "?"}`,
-      `- mission right now: ${coach.mission ?? "?"}`,
-      `- city: ${coach.city ?? "not set"}`,
-      coach.ig_profile
-        ? `- their Instagram brand: ${String(coach.ig_profile).slice(0, 800)}`
-        : "- Instagram brand: not scanned",
-    ].join("\n"),
-  });
+  // End of the stable prefix (frames + coach profile) — cached from here up,
+  // so a retry or a follow-up call on this session re-reads it cheaply.
+  content.push(
+    cacheable({
+      type: "text",
+      text: [
+        "THE COACH:",
+        `- sport / focus: ${coach.sport ?? "?"}`,
+        `- audience: ${coach.audience ?? "?"}`,
+        `- mission right now: ${coach.mission ?? "?"}`,
+        `- city: ${coach.city ?? "not set"}`,
+        coach.ig_profile
+          ? `- their Instagram brand: ${String(coach.ig_profile).slice(0, 800)}`
+          : "- Instagram brand: not scanned",
+      ].join("\n"),
+    })
+  );
 
   content.push({
     type: "text",
@@ -267,6 +271,7 @@ export async function direct({ session }) {
       "coaches. You reply with exactly one JSON object and no other text.",
     content,
     maxTokens: 4000,
+    label: "direct",
   });
   const plan = normalizePlan(extractJson(reply), assets);
 
@@ -401,6 +406,7 @@ export async function understand({ session }) {
         system:
           "You are Sideline's footage analyst. You only ever reply with valid JSON.",
         content,
+        label: `understand ${asset.id.slice(0, 8)}`,
       });
       return extractJson(reply);
     });
@@ -485,6 +491,7 @@ async function ensureIgProfile(coach) {
         },
       ],
       maxTokens: 600,
+      label: "ig-scan",
     });
     const summary = reply.trim().slice(0, 2000);
     const scannedAt = new Date().toISOString();
@@ -601,7 +608,10 @@ async function composePlannedPiece({
   const multi = String(pp.kind) !== "single";
   const target = clampNum(Number(pp.target_length_sec), 8, 60, 25);
 
-  const prompt = [
+  // The coach preamble is byte-identical for every piece in this session, so
+  // it's sent as its own cached block: piece 1 writes the cache, pieces 2-5
+  // read it back cheaply instead of re-billing the whole profile each time.
+  const coachPreamble = [
     `You are the coach's editor + ghostwriter. Build the ONE piece the DIRECTOR asked for below.`,
     `Coach: name=${coach.name}; sport=${coach.sport}; tones=${(
       coach.tones ?? []
@@ -615,7 +625,11 @@ async function composePlannedPiece({
     coach.ig_profile
       ? `Their real Instagram vibe: ${String(coach.ig_profile).slice(0, 1200)}`
       : ``,
-    ``,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const prompt = [
     `THE DIRECTOR'S BRIEF FOR THIS PIECE (follow it):`,
     `- kind: ${pp.kind}`,
     `- why it exists (keep this intent alive in the copy): ${pp.why_this_piece}`,
@@ -647,8 +661,12 @@ async function composePlannedPiece({
   const reply = await askClaude({
     system:
       "You are an elite short-form sports video editor and ghostwriter. You realize the director's recipe precisely and reply with exactly one valid JSON object.",
-    content: [{ type: "text", text: prompt }],
+    content: [
+      cacheable({ type: "text", text: coachPreamble }),
+      { type: "text", text: prompt },
+    ],
     maxTokens: 3000,
+    label: `compose ${pp.piece_id}`,
   });
   const draft = extractJson(reply);
 
@@ -1096,6 +1114,10 @@ export async function revise({ session }) {
           }
         });
       }
+      // Frames are the expensive part of a revision — cache up to the last one
+      // so repeat revisions on the same piece re-read them instead of re-billing.
+      if (content.length > 1)
+        content[content.length - 1] = cacheable(content[content.length - 1]);
 
       content.push({
         type: "text",
@@ -1152,6 +1174,7 @@ export async function revise({ session }) {
           "You are a precise short-form video editor. You apply the coach's notes faithfully with real eyes on the footage, and reply with exactly one valid JSON object.",
         content,
         maxTokens: 4000,
+        label: `revise ${piece.id.slice(0, 8)}`,
       });
       const draft = extractJson(reply);
 

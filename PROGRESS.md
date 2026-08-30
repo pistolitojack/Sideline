@@ -1,5 +1,24 @@
 # Sideline — Build Progress
 
+## Phase 3 — The AI Brain (in progress)
+
+- **Baseline saved** — `BASELINE-BEFORE-PHASE-3.md` captures session
+  `ec978e5a` (3 videos, empty prompt): the director's full plan, all three
+  finished pieces, six objective observations, and Jack's feel note. Every
+  Phase 3 item is compared back to this.
+- **Bug fix (found during baseline):** burned-in captions rendered a "tofu"
+  square (□) wherever copy contained an emoji, because the DejaVu font has no
+  emoji glyphs. `sanitizeForBurn()` now strips emoji/pictographs/symbols before
+  drawtext; em dashes, ellipses, curly quotes and accented Latin survive.
+- **3.1 Prompt caching** ✅ built — `askClaude` now sends the system prompt as a
+  cached block, accepts a `cacheable()` marker for the last block of a stable
+  prefix, and logs per-call token usage (`in / cache_write / cache_read / out`,
+  flagged "cache HIT"). Cache points: the director's frames+coach profile, the
+  compose stage's coach preamble (identical across the 3-5 piece calls in a
+  session — the biggest win), and the revise stage's sampled frames. Every
+  Claude call is now labeled in the worker logs.
+
+
 ## Phase 2 — The AI director ✅ complete
 
 - **2.5 Natural-language revision loop** ✅ — the revise stage now works like
