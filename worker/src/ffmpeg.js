@@ -134,8 +134,11 @@ function pickTimestamps(timeline, duration, maxFrames) {
   }
 
   const times = new Set();
+  // Never ask for a frame at the exact end: ffmpeg seeks past the last frame
+  // and writes nothing (while still exiting 0).
+  const last = Math.max(0, dur - 0.3);
   const add = (x) => {
-    const v = Math.round(Math.max(0, Math.min(x, dur)) * 10) / 10;
+    const v = Math.round(Math.max(0, Math.min(x, last)) * 10) / 10;
     times.add(v);
   };
   for (const pk of peaks) for (let x = pk - 2; x <= pk + 2; x += 0.5) add(x);
@@ -190,6 +193,7 @@ export async function sampleFrames(localPath, duration, outDir, maxFrames = 30) 
 
   // Exact seeks give an exact frame->timestamp mapping, which matters because
   // the AI cuts using these timestamps.
+  const { stat } = await import("node:fs/promises");
   const out = [];
   for (let i = 0; i < picked.times.length; i++) {
     const t = picked.times[i];
@@ -204,10 +208,33 @@ export async function sampleFrames(localPath, duration, outDir, maxFrames = 30) 
         "-q:v", "6",
         file,
       ]);
-      out.push({ path: file, t });
+      // ffmpeg exits 0 even when a seek lands past the last frame and nothing
+      // is written, so only trust a frame that actually exists on disk.
+      const info = await stat(file).catch(() => null);
+      if (info && info.size > 0) out.push({ path: file, t });
     } catch {
-      // A seek past the last keyframe can come back empty — skip that frame.
+      // Unreadable seek — skip this frame rather than fail the stage.
     }
+  }
+  // If seeking somehow produced nothing usable, fall back rather than handing
+  // the AI an empty set.
+  if (!out.length) {
+    const interval = Math.max(1.5, (duration || 60) / maxFrames);
+    await ff([
+      "-y", "-i", localPath,
+      "-vf", `fps=1/${interval},scale=512:-2`,
+      "-q:v", "6",
+      `${outDir}/u_%03d.jpg`,
+    ]);
+    const { readdir } = await import("node:fs/promises");
+    const files = (await readdir(outDir))
+      .filter((f) => f.startsWith("u_"))
+      .sort()
+      .slice(0, maxFrames);
+    return files.map((f, i) => ({
+      path: `${outDir}/${f}`,
+      t: Math.round(i * interval * 10) / 10,
+    }));
   }
   return out;
 }
