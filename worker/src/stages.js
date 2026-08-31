@@ -632,8 +632,26 @@ async function composePlannedPiece({
     })
     .join("\n");
 
-  const multi = String(pp.kind) !== "single";
   const target = clampNum(Number(pp.target_length_sec), 8, 60, 25);
+
+  // How long one shot may hold — and how many shots to plan — depends on what
+  // the piece is FOR, not just whether it uses multiple clips. A montage wants
+  // fast beats. A teaching or story piece has to let a whole rep play out, or
+  // the drill never lands and the viewer never sees the payoff. (Everything
+  // used to inherit the montage's 6s-per-shot cap, which made it impossible to
+  // show an 8-second rep in full.)
+  const kind = String(pp.kind);
+  const single = kind === "single";
+  const fast = ["montage", "hype", "funny_moment", "funny", "pov"].includes(
+    kind
+  );
+  const multi = !single;
+  const perSegCap = single ? 60 : fast ? 5 : 20;
+  const segGuide = single
+    ? `exactly ONE continuous segment`
+    : fast
+    ? `${target < 20 ? "4-7" : "6-10"} fast beats`
+    : `${target < 20 ? "2-3" : "3-5"} longer shots that each let the action finish`;
 
   const stablePrefix = [
     `You are the coach's editor + ghostwriter. You build ONE piece at a time, exactly as the DIRECTOR briefs you.`,
@@ -658,8 +676,13 @@ async function composePlannedPiece({
     `  default), "fade" (mood shift), "slideleft"/"slideright" (whip to a new`,
     `  angle), "circleopen" (reveal). Mostly cuts and fades; at most 1-2`,
     `  specialty wipes.`,
-    `- Multi-clip segments run 1-6s each; a single cut may run longer. Never`,
-    `  over 60s total.`,
+    `- NEVER cut in the middle of a rep. A shot starts just BEFORE the action`,
+    `  begins and ends just AFTER it finishes. A drill the viewer never sees`,
+    `  complete is a wasted shot — landing the payoff beats adding another cut.`,
+    `- Fast pieces (montage/hype) use short beats. Teaching, story and`,
+    `  transformation pieces hold each shot long enough for the whole rep to`,
+    `  play out — a 10-15s shot is correct there, not a flaw.`,
+    `- Never over 60s total.`,
     `- Write the copy in the coach's voice, shaped by the piece's kind and the`,
     `  intent behind it.`,
     `- Caption beats land inside the cut (t=0 = cut start): a hook beat in the`,
@@ -692,11 +715,16 @@ async function composePlannedPiece({
         )} — build from those unless the recipe clearly calls for another.`
       : `- any moment listed above may be used.`,
     ``,
-    multi
-      ? `Build ${
-          target < 20 ? "3-6" : "5-10"
-        } segments that realize the recipe.`
-      : `Build exactly ONE segment — a single clean cut that realizes the recipe (hook early, land the payoff).`,
+    single
+      ? `Build exactly ONE segment — a single clean cut that realizes the recipe (hook early, land the payoff).`
+      : `Build ${segGuide} that realize the recipe.`,
+    single
+      ? ``
+      : fast
+      ? `This is a fast piece: beats of roughly 1.5-5s, cut on impact.`
+      : `This is NOT a fast piece: hold each shot until the rep or drill is` +
+        ` visibly COMPLETE (up to ~${perSegCap}s). Fewer, longer shots beat` +
+        ` more, choppier ones. Do not chop a rep into pieces.`,
     `Aim for ~${target}s total.`,
   ]
     .filter(Boolean)
@@ -732,7 +760,8 @@ async function composePlannedPiece({
       const lo = Math.max(0, m.t_start - 1);
       const hi = Math.min(m.t_end + 1, a?.duration_sec ?? m.t_end + 1);
       const start = Math.max(lo, Math.min(Number(seg.in), hi - 1));
-      const perSegCap = multi ? 6 : 60;
+      // perSegCap comes from the piece's kind (see above): fast pieces get
+      // short beats, teaching/story pieces get room for a full rep.
       const end = Math.min(
         hi,
         Math.max(start + 1, Math.min(Number(seg.out), start + perSegCap))
@@ -1205,10 +1234,13 @@ export async function revise({ session }) {
           `"${note}"`,
           ``,
           `Rules: cuts may move anywhere inside the source durations. Reels max`,
-          `60s, stories max 15s. A single clean cut is ONE segment; multi-clip`,
-          `segments run 1-6s each with a "transition" per segment`,
-          `(cut|fade|slideleft|slideright|circleopen). Caption beats stay inside`,
-          `the cut (t=0 = start).`,
+          `60s, stories max 15s. A single clean cut is ONE segment. Each segment`,
+          `names a "transition" (cut|fade|slideleft|slideright|circleopen).`,
+          `NEVER cut in the middle of a rep — a shot starts just before the`,
+          `action and ends just after it finishes. Fast pieces (montage/hype)`,
+          `use ~1.5-5s beats; teaching/story pieces hold a shot as long as the`,
+          `rep needs (10-15s is fine). Caption beats stay inside the cut`,
+          `(t=0 = start).`,
           ``,
           `FIRST, think inside a <thinking> block: what EXACTLY is the coach`,
           `asking to change, what must stay untouched, and what the new cut needs`,
