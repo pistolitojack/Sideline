@@ -31,6 +31,14 @@
 - **Bug fix:** every non-"single" piece had inherited the montage's hard 6s
   per-shot cap, so a teaching or story piece could never show a full rep. That
   was the root cause of "it didn't let any drill play out."
+- **Thinking had to be bounded (spec deviation).** Phase 3 said not to force a
+  word count on the `<thinking>` block. Unbounded, it burned the entire output
+  budget three separate times — pieces were dropped, one compose call took two
+  minutes, and cost climbed. Compose now has a hard limit of ~120 words of
+  terse notes. Reasoning quality held; the runaway stopped. Truncation salvage
+  was also rewritten to walk back comma-by-comma, so a cut-off reply keeps its
+  valid parts (verified against mid-key, mid-number, and deep-nested cuts)
+  instead of losing the piece.
 - **3.2 Thinking space** ✅ built — the director, understand, compose and revise
   prompts now ask the model to reason inside a `<thinking>` block before it
   emits JSON (no word limit — it takes the space it needs), and each system

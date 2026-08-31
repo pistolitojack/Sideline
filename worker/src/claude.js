@@ -105,8 +105,10 @@ export function extractJson(text) {
   }
 }
 
-// Append the closing quote/brackets a truncated JSON fragment is missing.
-function closeOpenJson(fragment) {
+// Close the quote/brackets a truncated JSON fragment is missing, and drop any
+// half-written trailing token (a dangling comma, a colon with no value, or a
+// key whose value never arrived).
+function balanceJson(fragment) {
   const stack = [];
   let inStr = false;
   let esc = false;
@@ -128,8 +130,30 @@ function closeOpenJson(fragment) {
     else if (ch === "}" || ch === "]") stack.pop();
   }
   let out = fragment;
-  if (inStr) out += '"'; // close a half-written string
-  out = out.replace(/,\s*$/, ""); // drop a dangling comma
+  if (inStr) out += '"';
+  out = out
+    .replace(/[,:]\s*$/, "") // dangling comma or colon
+    .replace(/,?\s*"[^"]*"\s*:\s*$/, ""); // key with no value
   while (stack.length) out += stack.pop() === "{" ? "}" : "]";
   return out;
+}
+
+// Truncation can land anywhere — mid-number, mid-key, inside a nested object.
+// Walk back comma by comma until a version parses, so we keep as much of the
+// reply as is actually valid instead of losing the whole piece.
+function closeOpenJson(fragment) {
+  let cut = fragment.length;
+  for (let i = 0; i < 40 && cut > 0; i++) {
+    const attempt = balanceJson(fragment.slice(0, cut));
+    try {
+      JSON.parse(attempt);
+      return attempt;
+    } catch {
+      /* try an earlier boundary */
+    }
+    const prev = fragment.lastIndexOf(",", cut - 1);
+    if (prev <= 0) break;
+    cut = prev;
+  }
+  return balanceJson(fragment);
 }

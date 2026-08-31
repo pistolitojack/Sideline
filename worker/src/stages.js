@@ -604,7 +604,7 @@ async function composePlannedPiece({
   // across the 3-5 compose calls AND large enough to clear Anthropic's ~1k
   // token cache minimum, so pieces 2+ read the prefix back instead of
   // re-billing it.
-  const pool = allMoments.slice(0, 16);
+  const pool = allMoments.slice(0, 12);
   if (!pool.length) return false;
 
   // Which of those moments did the director assign to THIS piece?
@@ -628,7 +628,7 @@ async function composePlannedPiece({
         landscape ? "landscape" : "vertical"
       } source · ${m.type} · ${m.reason} · said: "${(
         m.transcript_span || "(no speech)"
-      ).slice(0, 200)}"`;
+      ).slice(0, 120)}"`;
     })
     .join("\n");
 
@@ -682,10 +682,12 @@ async function composePlannedPiece({
     ``,
     `FIRST, think inside a <thinking> block: which exact moments realize this`,
     `recipe, where each cut should land, and what this specific piece should say`,
-    `that none of the coach's other pieces would. THEN close the block and`,
-    `return ONLY one JSON object. Keep the thinking SHORT — a few sentences of`,
-    `real reasoning, then stop and write the JSON. The JSON is what matters;`,
-    `never spend the whole reply thinking.`,
+    `that none of the coach's other pieces would.`,
+    `HARD LIMIT: the <thinking> block must be UNDER 120 WORDS. Terse notes, not`,
+    `prose — you are deciding, not explaining. Do not restate the moment list,`,
+    `do not draft the copy twice, do not weigh options you have already ruled`,
+    `out. Close the block and spend the rest of your reply on the JSON.`,
+    `THEN return ONLY one JSON object:`,
     `{"segments": [{"moment_index": 0, "in": <abs s>, "out": <abs s>, "transition": "cut"}],`,
     ` "captions": [{"text":"HOOK.","t0":0,"t1":2.2,"style":"hook"},{"text":"body beat","t0":3,"t1":6,"style":"body"}],`,
     ` "hook":"...", "caption":"1-4 sentences in the coach's voice", "hashtags":"#four #to #six #tags",`,
