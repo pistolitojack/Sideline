@@ -100,7 +100,8 @@ const clampNum = (n, lo, hi, dflt) =>
 const DIRECTOR_SCHEMA = [
   "FIRST, think it through inside a <thinking> block: what is actually IN this",
   "footage, what does this coach need right now, which pieces the clips can",
-  "genuinely support, and why each one earns its place. Take the space you need.",
+  "genuinely support, and why each one earns its place. Reason enough to decide",
+  "well, then STOP — never spend the whole reply thinking.",
   "THEN close the block and return ONE JSON object with EXACTLY these fields:",
   "{",
   '  "read_of_footage": "2-4 sentences: what is in the videos and how they',
@@ -409,7 +410,8 @@ export async function understand({ session }) {
           `FIRST, think inside a <thinking> block: what is happening across`,
           `these frames, where does each action actually START and FINISH, and`,
           `which stretches are genuinely worth posting. THEN close the block and`,
-          `return ONLY a JSON array:`,
+          `return ONLY a JSON array. Keep the thinking proportionate — reason`,
+          `enough to decide, then STOP and write the JSON.`,
           `[{"t_start": 7.5, "t_end": 20.8, "type": "teaching|hype|transformation|story|funny|technique",`,
           `  "score": 0.0-1.0, "reason": "one sentence", "hook_idea": "short hook"}]`,
         ].join("\n"),
@@ -666,7 +668,9 @@ async function composePlannedPiece({
     `FIRST, think inside a <thinking> block: which exact moments realize this`,
     `recipe, where each cut should land, and what this specific piece should say`,
     `that none of the coach's other pieces would. THEN close the block and`,
-    `return ONLY one JSON object:`,
+    `return ONLY one JSON object. Keep the thinking SHORT — a few sentences of`,
+    `real reasoning, then stop and write the JSON. The JSON is what matters;`,
+    `never spend the whole reply thinking.`,
     `{"segments": [{"moment_index": 0, "in": <abs s>, "out": <abs s>, "transition": "cut"}],`,
     ` "captions": [{"text":"HOOK.","t0":0,"t1":2.2,"style":"hook"},{"text":"body beat","t0":3,"t1":6,"style":"body"}],`,
     ` "hook":"...", "caption":"1-4 sentences in the coach's voice", "hashtags":"#four #to #six #tags",`,
@@ -706,8 +710,9 @@ async function composePlannedPiece({
       { type: "text", text: pieceBrief },
     ],
     // Headroom for the <thinking> block so a long reasoning pass can never
-    // truncate the JSON that follows it.
-    maxTokens: 4000,
+    // truncate the JSON that follows it. (At 4000 the model spent the whole
+    // budget reasoning and never emitted JSON.)
+    maxTokens: 8000,
     // The rough prefix size rides along in the label: if caching ever stops
     // engaging, this says immediately whether the block fell under the ~1k
     // token minimum.
@@ -1207,7 +1212,8 @@ export async function revise({ session }) {
           ``,
           `FIRST, think inside a <thinking> block: what EXACTLY is the coach`,
           `asking to change, what must stay untouched, and what the new cut needs`,
-          `to look like. THEN close the block and return ONLY this JSON object:`,
+          `to look like. Keep it brief. THEN close the block and return ONLY`,
+          `this JSON object:`,
           `{"edl": {"segments": [{"asset_id": "...", "in": 0, "out": 3, "transition": "cut"}],`,
           `  "crop": {"mode": "center|eased", "start_x_frac": 0.5},`,
           `  "captions": [{"text": "...", "t0": 0, "t1": 2.4, "style": "hook|body"}]},`,
@@ -1222,7 +1228,8 @@ export async function revise({ session }) {
         system:
           "You are a precise short-form video editor. You apply the coach's notes faithfully with real eyes on the footage. You reason inside a <thinking> block first, then reply with exactly one valid JSON object.",
         content,
-        maxTokens: 4000,
+        // Room for reasoning plus the revised cut.
+        maxTokens: 6000,
         label: `revise ${piece.id.slice(0, 8)}`,
       });
       const draft = extractJson(reply);
