@@ -634,24 +634,14 @@ async function composePlannedPiece({
 
   const target = clampNum(Number(pp.target_length_sec), 8, 60, 25);
 
-  // How long one shot may hold — and how many shots to plan — depends on what
-  // the piece is FOR, not just whether it uses multiple clips. A montage wants
-  // fast beats. A teaching or story piece has to let a whole rep play out, or
-  // the drill never lands and the viewer never sees the payoff. (Everything
-  // used to inherit the montage's 6s-per-shot cap, which made it impossible to
-  // show an 8-second rep in full.)
+  // No pacing formulas. The editor decides shot length from the ACTION it can
+  // see — that judgment is the whole point of the director architecture. The
+  // only bound left is a safety rail so a malformed reply can't produce an
+  // absurd cut or a broken render.
   const kind = String(pp.kind);
   const single = kind === "single";
-  const fast = ["montage", "hype", "funny_moment", "funny", "pov"].includes(
-    kind
-  );
   const multi = !single;
-  const perSegCap = single ? 60 : fast ? 5 : 20;
-  const segGuide = single
-    ? `exactly ONE continuous segment`
-    : fast
-    ? `${target < 20 ? "4-7" : "6-10"} fast beats`
-    : `${target < 20 ? "2-3" : "3-5"} longer shots that each let the action finish`;
+  const perSegCap = single ? 60 : 30;
 
   const stablePrefix = [
     `You are the coach's editor + ghostwriter. You build ONE piece at a time, exactly as the DIRECTOR briefs you.`,
@@ -676,12 +666,14 @@ async function composePlannedPiece({
     `  default), "fade" (mood shift), "slideleft"/"slideright" (whip to a new`,
     `  angle), "circleopen" (reveal). Mostly cuts and fades; at most 1-2`,
     `  specialty wipes.`,
-    `- NEVER cut in the middle of a rep. A shot starts just BEFORE the action`,
-    `  begins and ends just AFTER it finishes. A drill the viewer never sees`,
-    `  complete is a wasted shot — landing the payoff beats adding another cut.`,
-    `- Fast pieces (montage/hype) use short beats. Teaching, story and`,
-    `  transformation pieces hold each shot long enough for the whole rep to`,
-    `  play out — a 10-15s shot is correct there, not a flaw.`,
+    `- YOU decide how long each shot holds and how many shots the piece needs.`,
+    `  There is no target count and no formula. Read the action and cut to it.`,
+    `- A shot must contain a COMPLETE action: start just BEFORE it begins, end`,
+    `  just AFTER it finishes. NEVER cut in the middle of a rep. A drill the`,
+    `  viewer never sees complete is a wasted shot.`,
+    `- A hype piece feels fast because you CHOOSE short, punchy actions — not`,
+    `  because you truncate long ones. A teaching piece feels clear because you`,
+    `  let the whole rep breathe. Same rule, different footage.`,
     `- Never over 60s total.`,
     `- Write the copy in the coach's voice, shaped by the piece's kind and the`,
     `  intent behind it.`,
@@ -716,16 +708,10 @@ async function composePlannedPiece({
       : `- any moment listed above may be used.`,
     ``,
     single
-      ? `Build exactly ONE segment — a single clean cut that realizes the recipe (hook early, land the payoff).`
-      : `Build ${segGuide} that realize the recipe.`,
-    single
-      ? ``
-      : fast
-      ? `This is a fast piece: beats of roughly 1.5-5s, cut on impact.`
-      : `This is NOT a fast piece: hold each shot until the rep or drill is` +
-        ` visibly COMPLETE (up to ~${perSegCap}s). Fewer, longer shots beat` +
-        ` more, choppier ones. Do not chop a rep into pieces.`,
-    `Aim for ~${target}s total.`,
+      ? `Build exactly ONE continuous segment that realizes the recipe (hook early, land the payoff).`
+      : `Use however many shots this piece actually needs — no target count.` +
+        ` Let the kind and the footage decide the rhythm.`,
+    `Aim for roughly ${target}s total, but serve the action over the number.`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -1237,10 +1223,9 @@ export async function revise({ session }) {
           `60s, stories max 15s. A single clean cut is ONE segment. Each segment`,
           `names a "transition" (cut|fade|slideleft|slideright|circleopen).`,
           `NEVER cut in the middle of a rep — a shot starts just before the`,
-          `action and ends just after it finishes. Fast pieces (montage/hype)`,
-          `use ~1.5-5s beats; teaching/story pieces hold a shot as long as the`,
-          `rep needs (10-15s is fine). Caption beats stay inside the cut`,
-          `(t=0 = start).`,
+          `action and ends just after it finishes. YOU decide shot lengths from`,
+          `the action itself; there is no formula. Caption beats stay inside the`,
+          `cut (t=0 = start).`,
           ``,
           `FIRST, think inside a <thinking> block: what EXACTLY is the coach`,
           `asking to change, what must stay untouched, and what the new cut needs`,
