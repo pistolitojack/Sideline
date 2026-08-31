@@ -92,5 +92,44 @@ export function extractJson(text) {
       }
     }
   }
-  throw new Error("Claude returned unbalanced JSON");
+  // The reply was cut off mid-JSON (the model ran out of output budget).
+  // Rather than throwing away the whole session, close whatever is still open
+  // and parse what we got — the stages all tolerate missing fields, so a
+  // slightly short plan still beats a failed upload.
+  try {
+    const salvaged = JSON.parse(closeOpenJson(candidate.slice(start)));
+    console.warn("  (recovered a truncated JSON reply)");
+    return salvaged;
+  } catch {
+    throw new Error("Claude returned unbalanced JSON");
+  }
+}
+
+// Append the closing quote/brackets a truncated JSON fragment is missing.
+function closeOpenJson(fragment) {
+  const stack = [];
+  let inStr = false;
+  let esc = false;
+  for (const ch of fragment) {
+    if (esc) {
+      esc = false;
+      continue;
+    }
+    if (ch === "\\") {
+      esc = true;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = !inStr;
+      continue;
+    }
+    if (inStr) continue;
+    if (ch === "{" || ch === "[") stack.push(ch);
+    else if (ch === "}" || ch === "]") stack.pop();
+  }
+  let out = fragment;
+  if (inStr) out += '"'; // close a half-written string
+  out = out.replace(/,\s*$/, ""); // drop a dangling comma
+  while (stack.length) out += stack.pop() === "{" ? "}" : "]";
+  return out;
 }

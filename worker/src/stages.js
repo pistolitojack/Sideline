@@ -144,6 +144,8 @@ const DIRECTOR_SCHEMA = [
   "- If no request, make a VARIED pack — do not repeat the same kind.",
   "- EVERY piece MUST have a real why_this_piece (no empty strings).",
   "- Use the EXACT asset_id strings shown above. Never invent ids.",
+  "- Keep structural_recipe under 60 words and why_this_piece to ONE sentence.",
+  "  Be concrete, not lavish — a long recipe crowds out the rest of the plan.",
 ].join("\n");
 
 function normalizePlan(raw, assets) {
@@ -274,7 +276,11 @@ export async function direct({ session }) {
       "coaches. You reason inside a <thinking> block first, then reply with " +
       "exactly one JSON object.",
     content,
-    maxTokens: 4000,
+    // The plan is a large JSON object AND the model now reasons before it
+    // writes. At 4000 the JSON was being truncated mid-structure (visible in
+    // BASELINE-BEFORE-PHASE-3.md, where a recipe cuts off mid-word), which
+    // fails to parse. Give both the reasoning and the plan real room.
+    maxTokens: 8000,
     label: "direct",
   });
   const plan = normalizePlan(extractJson(reply), assets);
@@ -414,6 +420,9 @@ export async function understand({ session }) {
           "You are Sideline's footage analyst. You reason inside a <thinking> " +
           "block first, then reply with valid JSON.",
         content,
+        // Reasoning + a long moment list needs headroom too (same truncation
+        // risk that took down the director).
+        maxTokens: 6000,
         label: `understand ${asset.id.slice(0, 8)}`,
       });
       return extractJson(reply);
