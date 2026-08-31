@@ -98,7 +98,10 @@ const clampNum = (n, lo, hi, dflt) =>
   Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
 
 const DIRECTOR_SCHEMA = [
-  "Return ONE JSON object, nothing else, with EXACTLY these fields:",
+  "FIRST, think it through inside a <thinking> block: what is actually IN this",
+  "footage, what does this coach need right now, which pieces the clips can",
+  "genuinely support, and why each one earns its place. Take the space you need.",
+  "THEN close the block and return ONE JSON object with EXACTLY these fields:",
   "{",
   '  "read_of_footage": "2-4 sentences: what is in the videos and how they',
   "    relate — same drill or different? multiple camera angles of the SAME",
@@ -268,7 +271,8 @@ export async function direct({ session }) {
   const reply = await askClaude({
     system:
       "You are a world-class short-form video creative director for sports " +
-      "coaches. You reply with exactly one JSON object and no other text.",
+      "coaches. You reason inside a <thinking> block first, then reply with " +
+      "exactly one JSON object.",
     content,
     maxTokens: 4000,
     label: "direct",
@@ -396,7 +400,10 @@ export async function understand({ session }) {
           `  segments (20-45s) when the footage supports them. Do not return`,
           `  only sub-10s clips.`,
           `- 4-45 seconds each, within the video's duration.`,
-          `Return ONLY a JSON array, no other text:`,
+          `FIRST, think inside a <thinking> block: what is happening across`,
+          `these frames, where does each action actually START and FINISH, and`,
+          `which stretches are genuinely worth posting. THEN close the block and`,
+          `return ONLY a JSON array:`,
           `[{"t_start": 7.5, "t_end": 20.8, "type": "teaching|hype|transformation|story|funny|technique",`,
           `  "score": 0.0-1.0, "reason": "one sentence", "hook_idea": "short hook"}]`,
         ].join("\n"),
@@ -404,7 +411,8 @@ export async function understand({ session }) {
 
       const reply = await askClaude({
         system:
-          "You are Sideline's footage analyst. You only ever reply with valid JSON.",
+          "You are Sideline's footage analyst. You reason inside a <thinking> " +
+          "block first, then reply with valid JSON.",
         content,
         label: `understand ${asset.id.slice(0, 8)}`,
       });
@@ -646,7 +654,10 @@ async function composePlannedPiece({
     `- Caption beats land inside the cut (t=0 = cut start): a hook beat in the`,
     `  first 2-3s, then 1-3 body beats.`,
     ``,
-    `Return ONLY one JSON object:`,
+    `FIRST, think inside a <thinking> block: which exact moments realize this`,
+    `recipe, where each cut should land, and what this specific piece should say`,
+    `that none of the coach's other pieces would. THEN close the block and`,
+    `return ONLY one JSON object:`,
     `{"segments": [{"moment_index": 0, "in": <abs s>, "out": <abs s>, "transition": "cut"}],`,
     ` "captions": [{"text":"HOOK.","t0":0,"t1":2.2,"style":"hook"},{"text":"body beat","t0":3,"t1":6,"style":"body"}],`,
     ` "hook":"...", "caption":"1-4 sentences in the coach's voice", "hashtags":"#four #to #six #tags",`,
@@ -680,12 +691,14 @@ async function composePlannedPiece({
 
   const reply = await askClaude({
     system:
-      "You are an elite short-form sports video editor and ghostwriter. You realize the director's recipe precisely and reply with exactly one valid JSON object.",
+      "You are an elite short-form sports video editor and ghostwriter. You realize the director's recipe precisely. You reason inside a <thinking> block first, then reply with exactly one valid JSON object.",
     content: [
       cacheable({ type: "text", text: stablePrefix }),
       { type: "text", text: pieceBrief },
     ],
-    maxTokens: 3000,
+    // Headroom for the <thinking> block so a long reasoning pass can never
+    // truncate the JSON that follows it.
+    maxTokens: 4000,
     // The rough prefix size rides along in the label: if caching ever stops
     // engaging, this says immediately whether the block fell under the ~1k
     // token minimum.
@@ -1183,7 +1196,9 @@ export async function revise({ session }) {
           `(cut|fade|slideleft|slideright|circleopen). Caption beats stay inside`,
           `the cut (t=0 = start).`,
           ``,
-          `Return ONLY this JSON object:`,
+          `FIRST, think inside a <thinking> block: what EXACTLY is the coach`,
+          `asking to change, what must stay untouched, and what the new cut needs`,
+          `to look like. THEN close the block and return ONLY this JSON object:`,
           `{"edl": {"segments": [{"asset_id": "...", "in": 0, "out": 3, "transition": "cut"}],`,
           `  "crop": {"mode": "center|eased", "start_x_frac": 0.5},`,
           `  "captions": [{"text": "...", "t0": 0, "t1": 2.4, "style": "hook|body"}]},`,
@@ -1196,7 +1211,7 @@ export async function revise({ session }) {
 
       const reply = await askClaude({
         system:
-          "You are a precise short-form video editor. You apply the coach's notes faithfully with real eyes on the footage, and reply with exactly one valid JSON object.",
+          "You are a precise short-form video editor. You apply the coach's notes faithfully with real eyes on the footage. You reason inside a <thinking> block first, then reply with exactly one valid JSON object.",
         content,
         maxTokens: 4000,
         label: `revise ${piece.id.slice(0, 8)}`,

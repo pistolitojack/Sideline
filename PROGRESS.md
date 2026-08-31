@@ -10,6 +10,15 @@
   square (□) wherever copy contained an emoji, because the DejaVu font has no
   emoji glyphs. `sanitizeForBurn()` now strips emoji/pictographs/symbols before
   drawtext; em dashes, ellipses, curly quotes and accented Latin survive.
+- **3.2 Thinking space** ✅ built — the director, understand, compose and revise
+  prompts now ask the model to reason inside a `<thinking>` block before it
+  emits JSON (no word limit — it takes the space it needs), and each system
+  prompt was updated to permit that. `extractJson` strips closed and truncated
+  thinking blocks before hunting for the payload, which matters because
+  reasoning prose routinely contains braces that would otherwise derail the
+  parser. Compose's token budget went 3000 → 4000 so a long reasoning pass can
+  never truncate the JSON. Verified against 6 parser cases including
+  braces-inside-thinking and old-style replies with no thinking at all.
 - **3.1 Prompt caching** ✅ built — `askClaude` now sends the system prompt as a
   cached block, accepts a `cacheable()` marker for the last block of a stable
   prefix, and logs per-call token usage (`in / cache_write / cache_read / out`,

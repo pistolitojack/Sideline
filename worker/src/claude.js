@@ -63,9 +63,19 @@ export async function imageBlock(path) {
 
 // Pull the first JSON array or object out of a model reply, tolerating
 // stray prose or code fences around it.
+//
+// Every stage now asks the model to reason inside a <thinking> block before it
+// answers. That prose routinely contains braces and quotes, so it MUST be
+// removed before we hunt for the JSON payload — otherwise the bracket walker
+// locks onto a brace inside the reasoning and fails to parse.
 export function extractJson(text) {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const candidate = fenced ? fenced[1] : text;
+  const cleaned = String(text)
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
+    // An unclosed <thinking> means the reply was cut off mid-reasoning; there
+    // is no JSON after it, so drop the tail.
+    .replace(/<thinking>[\s\S]*$/i, "");
+  const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const candidate = fenced ? fenced[1] : cleaned;
   const start = candidate.search(/[\[{]/);
   if (start === -1) throw new Error("Claude returned no JSON");
   // Walk to the matching close bracket.
