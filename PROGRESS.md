@@ -10,6 +10,27 @@
   square (□) wherever copy contained an emoji, because the DejaVu font has no
   emoji glyphs. `sanitizeForBurn()` now strips emoji/pictographs/symbols before
   drawtext; em dashes, ellipses, curly quotes and accented Latin survive.
+- **3.7 Motion-adaptive frame sampling** ✅ built (taken out of order — it is
+  the item that addresses Jack's "cuts at the wrong time" complaint, and it has
+  no dependency on 3.3-3.5). `sampleFrames` now runs a cheap analysis pass
+  (downscale → frame differencing → average luma of the difference) to find
+  where the clip actually MOVES, then samples ~0.5s apart inside a ±2s window
+  around each motion peak and ~3.5s apart elsewhere. Exact per-timestamp seeks
+  keep the frame→time mapping precise, which matters because the AI cuts using
+  those timestamps. Falls back to the old uniform sampler if the motion read
+  fails, so the stage can't break. Verified on synthetic footage: a clip with a
+  burst at 7.8-9.2s put 10 of 15 frames inside the action window.
+  *Deviation:* instead of dumping frames to a per-session debug folder (storage
+  cost), the worker logs the detected peak timestamps — same diagnostic value,
+  no storage.
+- **Pacing rules removed** — shot length and shot count are no longer
+  prescribed per kind. The editor decides from the action itself; only a safety
+  rail remains (30s/shot, 60s total) so a malformed reply can't break a render.
+  This replaced the kind-based caps added earlier the same day, per Jack: the
+  AI should be smart enough to judge, and hard numbers fight that.
+- **Bug fix:** every non-"single" piece had inherited the montage's hard 6s
+  per-shot cap, so a teaching or story piece could never show a full rep. That
+  was the root cause of "it didn't let any drill play out."
 - **3.2 Thinking space** ✅ built — the director, understand, compose and revise
   prompts now ask the model to reason inside a `<thinking>` block before it
   emits JSON (no word limit — it takes the space it needs), and each system
