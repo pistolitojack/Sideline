@@ -78,6 +78,25 @@
     A/B/A multi-angle cuts.
   - **Lesson:** the motion signal was never validated against real footage
     before it was wired into the prompt. Measure first, ship second.
+- **3.7's frame budget was being thrown away — the real upstream bug.** Reading
+  the stored peaks off Jack's session exposed it: three clips of 17s, 6s and 7s
+  produced ONE peak each (two for the 7s). The peak threshold is the clip's own
+  85th percentile, so a single large camera move raises the bar above every
+  athletic action in the clip. But the worse half was the sampler: it placed 9
+  frames in a ±2s window around the peak, then filled the rest of the clip at a
+  fixed 3.5s interval and stopped — so the 17s clip asked for **14 frames when
+  it was allowed 40**, with 9 of them bunched in one 4-second window. The
+  `understand` stage was finding moments in a 17-second video while seeing the
+  other 15 seconds through five stills. Wrong moments in, wrong cuts out — this
+  sits upstream of every cut-quality change made so far.
+  `framePlan` now spends the whole budget: emphasis around the beats (capped at
+  half the budget, so the director's 4-frame allowance can't be swallowed by
+  one peak window), then even coverage of the entire clip with what's left. On
+  Jack's real clips at the `understand` budget: 17s → **38 frames, largest gap
+  0.6s**; 6s → 21; 7s → 28. Over-budget clips now subsample evenly instead of
+  taking peak-adjacent frames first — with 6 peaks in the first 11s of a 60s
+  clip the old code stopped looking at 13s, the new one reaches 52.5s.
+  A bogus peak now costs emphasis, never coverage.
 - **Perf fix (my own regression, caught on the next run).** Measuring a clip's
   beats costs a FULL decode of the source, and three stages sample frames from
   the same clips — so adding the ingest measurement took a 3-video session from

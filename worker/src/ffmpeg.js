@@ -145,8 +145,16 @@ export async function motionPeaks(localPath) {
 }
 
 // Turn a clip's action beats into the frame timestamps to grab: dense (~0.5s)
-// inside a +/-2s window around each peak, sparse (~3.5s) everywhere else,
-// capped at maxFrames with peak-adjacent frames winning the cap.
+// inside a +/-2s window around each peak, then spend whatever budget is LEFT
+// on even coverage of the whole clip.
+//
+// That second half matters more than it looks. The old version filled the rest
+// at a fixed 3.5s interval, so a 17s clip with one detected peak asked for 14
+// frames when it was allowed 40 — nine of them bunched around a single
+// timestamp, and the other 15 seconds of footage seen through five stills. If
+// the peak was a camera wobble rather than an athlete, the AI never really saw
+// the clip at all. Spending the budget means a missed or bogus peak costs
+// emphasis, never coverage.
 function framePlan(peaks, duration, maxFrames) {
   const dur = duration || 60;
 
@@ -158,20 +166,38 @@ function framePlan(peaks, duration, maxFrames) {
     const v = Math.round(Math.max(0, Math.min(x, last)) * 10) / 10;
     times.add(v);
   };
-  for (const pk of peaks) for (let x = pk - 2; x <= pk + 2; x += 0.5) add(x);
-  for (let x = 0; x <= dur; x += 3.5) add(x);
+  // Emphasis around the beats — but never more than half the budget. The
+  // director only gets 4 frames per clip, and a single peak's window is 9
+  // frames wide; left uncapped it would spend the entire budget inside one
+  // 4-second window and the director would plan a piece having never seen the
+  // rest of the video.
+  let dense = [];
+  for (const pk of peaks) for (let x = pk - 2; x <= pk + 2; x += 0.5) dense.push(x);
+  const denseCap = Math.floor(maxFrames / 2);
+  if (dense.length > denseCap) {
+    const stride = dense.length / denseCap;
+    const trimmed = [];
+    for (let i = 0; i < denseCap; i++) trimmed.push(dense[Math.floor(i * stride)]);
+    dense = trimmed;
+  }
+  for (const x of dense) add(x);
+
+  const remaining = Math.max(0, maxFrames - times.size);
+  const step = remaining > 0 ? Math.max(0.4, dur / (remaining + 1)) : 3.5;
+  for (let x = 0; x <= dur; x += step) add(x);
 
   let list = [...times].sort((a, b) => a - b);
   if (list.length > maxFrames) {
-    const nearPeak = (x) => peaks.some((pk) => Math.abs(x - pk) <= 2);
-    const priority = list.filter(nearPeak);
-    const rest = list.filter((x) => !nearPeak(x));
-    list = priority.slice(0, maxFrames);
-    for (const x of rest) {
-      if (list.length >= maxFrames) break;
-      list.push(x);
-    }
-    list.sort((a, b) => a - b);
+    // Subsample evenly across the clip rather than taking peak-adjacent frames
+    // first. Peak windows are already denser in this list, so they keep
+    // proportionally more frames — but the end of the clip can never be
+    // dropped wholesale, which is what the old "priority first" pass did when
+    // a clip had several peaks near its start.
+    const stride = list.length / maxFrames;
+    const picked = [];
+    for (let i = 0; i < maxFrames; i++)
+      picked.push(list[Math.floor(i * stride)]);
+    list = [...new Set(picked)];
   }
   return { times: list, peaks };
 }
