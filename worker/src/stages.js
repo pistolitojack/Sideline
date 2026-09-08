@@ -97,6 +97,49 @@ const clamp01 = (n) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
 const clampNum = (n, lo, hi, dflt) =>
   Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
 
+// A piece shorter than this is a glitch, not a reel.
+const MIN_PIECE_SEC = 6;
+// Gap between one caption leaving the screen and the next arriving.
+const CAPTION_GAP = 0.15;
+// Below this a caption is on screen too briefly to read.
+const MIN_CAPTION_SEC = 0.6;
+
+// Put the caption beats in order and guarantee only ONE is ever on screen.
+//
+// The hook burns at 54px and wraps to as many as three lines, which reaches
+// well past the line where body captions sit — so any two captions alive at
+// the same instant print on top of each other. Rather than move the text
+// (which would change how every reel looks), make the overlap impossible:
+// sort by start time and clip each caption to end before the next begins.
+// Anything squeezed below MIN_CAPTION_SEC is dropped rather than flashed.
+export function orderCaptions(raw, totalDur) {
+  const list = (Array.isArray(raw) ? raw : [])
+    .filter((c) => c && c.text)
+    .map((c) => ({
+      text: String(c.text).slice(0, 80),
+      t0: Math.max(0, Math.min(Number(c.t0) || 0, totalDur)),
+      t1: Math.max(0, Math.min(Number(c.t1) || 0, totalDur)),
+      style: c.style === "hook" ? "hook" : "body",
+    }))
+    .filter((c) => c.t1 > c.t0)
+    .sort((a, b) => a.t0 - b.t0 || a.t1 - b.t1);
+
+  const kept = [];
+  for (const c of list) {
+    const prev = kept[kept.length - 1];
+    if (prev && c.t0 < prev.t1) {
+      const clipped = c.t0 - CAPTION_GAP;
+      // Making room for this beat would leave the one already on screen too
+      // brief to read. The earlier beat wins — it is usually the hook, and a
+      // reel that loses its hook is worse than one that loses a body line.
+      if (clipped - prev.t0 < MIN_CAPTION_SEC) continue;
+      prev.t1 = clipped;
+    }
+    kept.push(c);
+  }
+  return kept.filter((c) => c.t1 - c.t0 >= MIN_CAPTION_SEC);
+}
+
 const DIRECTOR_SCHEMA = [
   "Return ONE JSON object, nothing else, with EXACTLY these fields:",
   "{",
@@ -599,6 +642,7 @@ async function composePlannedPiece({
     .join("\n");
 
   const multi = String(pp.kind) !== "single";
+  const perSegCap = multi ? 6 : 60;
   const target = clampNum(Number(pp.target_length_sec), 8, 60, 25);
 
   const prompt = [
@@ -632,7 +676,9 @@ async function composePlannedPiece({
       : `Build exactly ONE segment — a single clean cut that realizes the recipe (hook early, land the payoff).`,
     `Aim for ~${target}s total, never over 60s. Multi-clip segments run 1-6s each; a single cut may run longer.`,
     `Write the copy in the coach's voice, shaped by the kind and the intent above.`,
+    `The hook, the caption and every caption beat must describe the footage you ACTUALLY selected — the exercise that appears in your segments. Do NOT write about a moment you did not cut, and do not borrow words from a moment's speech unless that moment is in your segment list. A reel that talks about a different exercise than it shows is unusable.`,
     `Caption beats land inside the cut (t=0 = cut start): a hook beat in the first 2-3s, then 1-3 body beats.`,
+    `Only ONE caption is on screen at a time — give each beat its own window, never overlapping.`,
     ``,
     `Return ONLY one JSON object:`,
     `{"segments": [{"moment_index": 0, "in": <abs s>, "out": <abs s>, "transition": "cut"}],`,
@@ -662,7 +708,6 @@ async function composePlannedPiece({
       const lo = Math.max(0, m.t_start - 1);
       const hi = Math.min(m.t_end + 1, a?.duration_sec ?? m.t_end + 1);
       const start = Math.max(lo, Math.min(Number(seg.in), hi - 1));
-      const perSegCap = multi ? 6 : 60;
       const end = Math.min(
         hi,
         Math.max(start + 1, Math.min(Number(seg.out), start + perSegCap))
@@ -676,6 +721,9 @@ async function composePlannedPiece({
         transition: TRANSITIONS.includes(seg.transition)
           ? seg.transition
           : "cut",
+        // How far this shot could still run inside its own moment. Kept so a
+        // too-short piece can be lengthened before it is written off.
+        max_out: Math.min(hi, start + perSegCap),
       };
     })
     .filter(Boolean)
@@ -686,15 +734,34 @@ async function composePlannedPiece({
     });
   if (!segments.length) return false;
 
-  const captions = (Array.isArray(draft.captions) ? draft.captions : [])
-    .filter((c) => c.text)
-    .map((c) => ({
-      text: String(c.text).slice(0, 80),
-      t0: Math.max(0, Math.min(Number(c.t0) || 0, total)),
-      t1: Math.max(0, Math.min(Number(c.t1) || 0, total)),
-      style: c.style === "hook" ? "hook" : "body",
-    }))
-    .filter((c) => c.t1 > c.t0);
+  // Nothing used to stop a two-second reel from shipping as a finished piece.
+  // Before giving up on one, let the shots run further into the moments they
+  // already came from — the footage is there, the composer just asked for less
+  // of it.
+  if (total < MIN_PIECE_SEC) {
+    for (const seg of segments) {
+      if (total >= MIN_PIECE_SEC) break;
+      const room = seg.max_out - seg.out;
+      if (room <= 0.05) continue;
+      const take = Math.min(room, MIN_PIECE_SEC - total);
+      seg.out += take;
+      total += take;
+    }
+  }
+  for (const seg of segments) delete seg.max_out;
+
+  // Still too short: the footage genuinely isn't there. Skip the piece rather
+  // than hand the coach a two-second clip.
+  if (total < MIN_PIECE_SEC) {
+    console.log(
+      `    skipped ${pp.piece_id}: only ${total.toFixed(
+        1
+      )}s of usable footage (minimum ${MIN_PIECE_SEC}s)`
+    );
+    return false;
+  }
+
+  const captions = orderCaptions(draft.captions, total);
 
   // Poster from the opening segment → media_assets(kind render).
   const first = segments[0];
@@ -1215,15 +1282,9 @@ export async function revise({ session }) {
         continue;
       }
 
-      const captions = (draft.edl?.captions ?? [])
-        .filter((c) => c.text)
-        .map((c) => ({
-          text: String(c.text).slice(0, 80),
-          t0: Math.max(0, Math.min(Number(c.t0) || 0, total)),
-          t1: Math.max(0, Math.min(Number(c.t1) || 0, total)),
-          style: c.style === "hook" ? "hook" : "body",
-        }))
-        .filter((c) => c.t1 > c.t0);
+      // Same one-caption-at-a-time guarantee as compose — a revision must not
+      // be able to reintroduce overprinted text.
+      const captions = orderCaptions(draft.edl?.captions, total);
 
       // Fresh poster from the new opening (the cut may have moved).
       const first = segments[0];

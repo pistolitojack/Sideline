@@ -41,6 +41,29 @@ broken output no matter how good the AI's decisions are:
    moment while writing copy influenced by another moment's transcript. No code
    ties the copy to the footage actually used.
 
+**Guardrails landed (2026-09-08, after the revert was confirmed on a real
+session).** The three bugs above are fixed. Two are pure code and cannot make
+output worse; the third needed a prompt line, flagged below.
+1. *Captions can no longer overprint.* `orderCaptions()` sorts the beats and
+   clips each one to end `CAPTION_GAP` before the next begins, so only one is
+   ever on screen. When making room would leave the earlier beat unreadable,
+   the earlier beat wins — losing a body line beats losing the hook. Applied to
+   compose AND revise (revise had the same bug). Verified against six cases
+   including Jack's exact symptom (hook 0-4s under body 2-6s), reversed JSON
+   order, identical windows, and captions running past the end of the cut.
+   Clean caption sets pass through untouched.
+2. *No more two-second reels.* Each validated segment now records `max_out` —
+   how far it could still run inside its own moment. A piece under
+   `MIN_PIECE_SEC` (6s) is first repaired by letting its shots run longer, and
+   only skipped (with the reason logged) if the footage genuinely isn't there.
+   Verified: a 2s piece with room becomes 6s and ships; a 2s piece whose moment
+   really is 2s long is skipped; a healthy 24s montage is untouched.
+3. *Copy tied to the footage used.* **This one is a prompt change** — the only
+   AI-behavior change in this batch, deliberately narrow: an additive line
+   telling the composer the hook and captions must describe the segments it
+   actually selected, and not to borrow words from a moment it didn't cut. It
+   constrains copy only and cannot alter segment selection. Watch it.
+
 **The plan from here**, in order, one at a time with verification between:
 `revert (this commit)` → `guardrails for the three bugs above` → `an automatic
 structural checker so quality stops depending on Jack watching reels` → the
