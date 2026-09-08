@@ -18,6 +18,7 @@ import {
   sampleFrames,
   posterFrame,
   ffmpegRun,
+  motionPeaks,
 } from "./ffmpeg.js";
 import { askClaude, imageBlock, extractJson, cacheable } from "./claude.js";
 
@@ -72,14 +73,36 @@ export async function ingest({ session }) {
     await withTmp(async (dir) => {
       const local = await downloadTo(asset.storage_path, join(dir, "in.mp4"));
       const info = await probe(local);
-      await db
+      // Where the action actually spikes in this clip. The editor gets these
+      // later so its cuts can land ON a beat instead of near one.
+      const peaks = await motionPeaks(local);
+      console.log(
+        `  ${asset.id}: ${peaks.length} motion beat${
+          peaks.length === 1 ? "" : "s"
+        }${peaks.length ? ` at [${peaks.join(", ")}]s` : ""}`
+      );
+      const dims = {
+        duration_sec: info.duration,
+        width: info.width,
+        height: info.height,
+      };
+      const { error: upErr } = await db
         .from("media_assets")
-        .update({
-          duration_sec: info.duration,
-          width: info.width,
-          height: info.height,
-        })
+        .update({ ...dims, motion_peaks: peaks })
         .eq("id", asset.id);
+      // If v9-motion-peaks.sql hasn't been run yet, the column is missing and
+      // the whole update fails — which would silently cost us the dimensions
+      // too. Fall back to writing what we can and say so out loud.
+      if (upErr) {
+        console.warn(
+          `  motion_peaks not saved (${upErr.message}) — run supabase/v9-motion-peaks.sql`
+        );
+        const { error: dimErr } = await db
+          .from("media_assets")
+          .update(dims)
+          .eq("id", asset.id);
+        if (dimErr) throw new Error(`save asset info: ${dimErr.message}`);
+      }
       if (info.hasAudio) {
         const wav = await extractAudioWav(local, join(dir, "audio.wav"));
         await uploadFrom(wav, artifactPath(asset, "wav"), "audio/wav");
@@ -608,13 +631,13 @@ async function composePlannedPiece({
   if (!pool.length) return false;
 
   // Which of those moments did the director assign to THIS piece?
+  const allowedAssets = new Set();
   const allowedIdx = [];
   if (pp.cluster_ids_to_use?.length) {
-    const allowed = new Set();
     for (const cid of pp.cluster_ids_to_use)
-      for (const aid of clusterAssets[cid] ?? []) allowed.add(aid);
+      for (const aid of clusterAssets[cid] ?? []) allowedAssets.add(aid);
     pool.forEach((m, i) => {
-      if (allowed.has(m.asset_id)) allowedIdx.push(i);
+      if (allowedAssets.has(m.asset_id)) allowedIdx.push(i);
     });
   }
 
@@ -622,13 +645,19 @@ async function composePlannedPiece({
     .map((m, i) => {
       const a = byId[m.asset_id];
       const landscape = (a?.width ?? 0) > (a?.height ?? 0);
+      // The measured action beats that fall inside this moment (same +/-1s
+      // window the cut is allowed to use). These are where the clip actually
+      // moves — the editor cuts to them instead of guessing.
+      const beats = (Array.isArray(a?.motion_peaks) ? a.motion_peaks : [])
+        .filter((t) => t >= m.t_start - 1 && t <= m.t_end + 1)
+        .slice(0, 8);
       return `#${i} · asset=${m.asset_id} · ${m.t_start.toFixed(
         1
       )}s→${m.t_end.toFixed(1)}s (${(m.t_end - m.t_start).toFixed(1)}s) · ${
         landscape ? "landscape" : "vertical"
-      } source · ${m.type} · ${m.reason} · said: "${(
-        m.transcript_span || "(no speech)"
-      ).slice(0, 120)}"`;
+      } source · ${m.type} · ${m.reason} · beats: ${
+        beats.length ? `[${beats.join(", ")}]s` : "none measured"
+      } · said: "${(m.transcript_span || "(no speech)").slice(0, 120)}"`;
     })
     .join("\n");
 
@@ -638,9 +667,7 @@ async function composePlannedPiece({
   // see — that judgment is the whole point of the director architecture. The
   // only bound left is a safety rail so a malformed reply can't produce an
   // absurd cut or a broken render.
-  const kind = String(pp.kind);
-  const single = kind === "single";
-  const multi = !single;
+  const single = String(pp.kind) === "single";
   const perSegCap = single ? 60 : 30;
 
   const stablePrefix = [
@@ -661,19 +688,31 @@ async function composePlannedPiece({
     `EVERY MOMENT FOUND IN THIS SESSION — pick sub-ranges from INSIDE these, by index:`,
     momentList,
     ``,
-    `HOW TO BUILD ANY PIECE:`,
+    `CUT CRAFT — this is the job, and it is the SAME craft for every kind of`,
+    `piece. Hype, teaching, story: the rules below never change.`,
+    `- "beats" above are MEASURED: the exact seconds the action spikes (a jump,`,
+    `  a swing, a release, a sprint, contact). Trust them over the timestamps in`,
+    `  the reason text.`,
+    `- EVERY cut lands on a real beat — the impact, the landing, the release,`,
+    `  the finish, a hard change of direction. Cutting on nothing is what makes`,
+    `  an edit feel amateur. If a shot has no beat left to cut on, HOLD IT`,
+    `  LONGER until it does.`,
+    `- A shot contains a COMPLETE action: start ~0.5s BEFORE the beat so the`,
+    `  viewer sees it coming, end just AFTER it resolves. NEVER cut mid-rep. A`,
+    `  drill the viewer never sees finish is a wasted shot.`,
+    `- YOU decide how long each shot holds and how many shots the piece needs.`,
+    `  There is no target count and no formula: shot count follows the ENERGY`,
+    `  of the footage, and every shot must earn its place. Three long chunks is`,
+    `  not a montage; twenty jitter cuts is not a teaching piece.`,
+    `- Fast does not mean truncated. A piece feels fast because you CHOOSE`,
+    `  short, punchy complete actions — never because you clipped a long one in`,
+    `  half.`,
+    ``,
+    `EVERYTHING ELSE:`,
     `- Each segment names the transition INTO the next: "cut" (hard cut,`,
     `  default), "fade" (mood shift), "slideleft"/"slideright" (whip to a new`,
     `  angle), "circleopen" (reveal). Mostly cuts and fades; at most 1-2`,
     `  specialty wipes.`,
-    `- YOU decide how long each shot holds and how many shots the piece needs.`,
-    `  There is no target count and no formula. Read the action and cut to it.`,
-    `- A shot must contain a COMPLETE action: start just BEFORE it begins, end`,
-    `  just AFTER it finishes. NEVER cut in the middle of a rep. A drill the`,
-    `  viewer never sees complete is a wasted shot.`,
-    `- A hype piece feels fast because you CHOOSE short, punchy actions — not`,
-    `  because you truncate long ones. A teaching piece feels clear because you`,
-    `  let the whole rep breathe. Same rule, different footage.`,
     `- Never over 60s total.`,
     `- Write the copy in the coach's voice, shaped by the piece's kind and the`,
     `  intent behind it.`,
@@ -706,7 +745,7 @@ async function composePlannedPiece({
     allowedIdx.length
       ? `- the director assigned this piece these moment indexes: ${allowedIdx.join(
           ", "
-        )} — build from those unless the recipe clearly calls for another.`
+        )}. Build from THOSE ONLY — segments from any other moment are dropped.`
       : `- any moment listed above may be used.`,
     ``,
     single
@@ -739,8 +778,7 @@ async function composePlannedPiece({
   const draft = extractJson(reply);
 
   const TRANSITIONS = ["cut", "fade", "slideleft", "slideright", "circleopen"];
-  let total = 0;
-  const segments = (Array.isArray(draft.segments) ? draft.segments : [])
+  let segments = (Array.isArray(draft.segments) ? draft.segments : [])
     .map((seg) => {
       const m = pool[Number(seg.moment_index)];
       if (!m) return null;
@@ -748,8 +786,8 @@ async function composePlannedPiece({
       const lo = Math.max(0, m.t_start - 1);
       const hi = Math.min(m.t_end + 1, a?.duration_sec ?? m.t_end + 1);
       const start = Math.max(lo, Math.min(Number(seg.in), hi - 1));
-      // perSegCap comes from the piece's kind (see above): fast pieces get
-      // short beats, teaching/story pieces get room for a full rep.
+      // perSegCap is a safety rail, not a pacing rule — it only stops a
+      // malformed reply from producing an absurd shot.
       const end = Math.min(
         hi,
         Math.max(start + 1, Math.min(Number(seg.out), start + perSegCap))
@@ -765,12 +803,32 @@ async function composePlannedPiece({
           : "cut",
       };
     })
-    .filter(Boolean)
-    .filter((seg) => {
-      if (total >= 60) return false;
-      total += seg.out - seg.in;
-      return true;
-    });
+    .filter(Boolean);
+
+  // The director assigned this piece specific clips. Enforce that HERE rather
+  // than by trimming the prompt: the prompt keeps showing every moment (so the
+  // cached prefix stays identical across pieces) while the cut still lands only
+  // on the footage this piece was briefed for. Safety net — if enforcing would
+  // leave nothing, keep the composer's cut instead of losing the piece.
+  if (allowedAssets.size) {
+    const onBrief = segments.filter((s) => allowedAssets.has(s.asset_id));
+    if (onBrief.length) {
+      if (onBrief.length < segments.length)
+        console.log(
+          `    ${pp.piece_id}: dropped ${
+            segments.length - onBrief.length
+          } segment(s) from footage the director didn't assign`
+        );
+      segments = onBrief;
+    }
+  }
+
+  let total = 0;
+  segments = segments.filter((seg) => {
+    if (total >= 60) return false;
+    total += seg.out - seg.in;
+    return true;
+  });
   if (!segments.length) return false;
 
   const captions = (Array.isArray(draft.captions) ? draft.captions : [])
@@ -1171,11 +1229,16 @@ export async function revise({ session }) {
         await withTmp(async (dir) => {
           const local = await downloadTo(a.storage_path, join(dir, "in.mp4"));
           const frames = await sampleFrames(local, a.duration_sec, dir, 3);
+          const beats = (Array.isArray(a.motion_peaks) ? a.motion_peaks : [])
+            .slice(0, 12)
+            .join(", ");
           content.push({
             type: "text",
-            text: `SOURCE ${aid} — ${Math.round(a.duration_sec ?? 0)}s · ${
-              (a.width ?? 0) > (a.height ?? 0) ? "landscape" : "vertical"
-            }`,
+            text:
+              `SOURCE ${aid} — ${Math.round(a.duration_sec ?? 0)}s · ${
+                (a.width ?? 0) > (a.height ?? 0) ? "landscape" : "vertical"
+              }` +
+              (beats ? ` · measured action beats at [${beats}]s` : ""),
           });
           for (const f of frames) {
             content.push({ type: "text", text: `  frame at t=${f.t}s:` });
@@ -1226,8 +1289,11 @@ export async function revise({ session }) {
           `names a "transition" (cut|fade|slideleft|slideright|circleopen).`,
           `NEVER cut in the middle of a rep — a shot starts just before the`,
           `action and ends just after it finishes. YOU decide shot lengths from`,
-          `the action itself; there is no formula. Caption beats stay inside the`,
-          `cut (t=0 = start).`,
+          `the action itself; there is no formula. Land every cut on a real`,
+          `beat (impact, landing, release, finish, hard direction change) — the`,
+          `measured beats listed with each SOURCE are where the clip actually`,
+          `moves. No beat to cut on? Hold the shot longer. Caption beats stay`,
+          `inside the cut (t=0 = start).`,
           ``,
           `FIRST, think inside a <thinking> block: what EXACTLY is the coach`,
           `asking to change, what must stay untouched, and what the new cut needs`,

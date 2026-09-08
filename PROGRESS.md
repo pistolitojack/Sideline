@@ -28,6 +28,27 @@
   rail remains (30s/shot, 60s total) so a malformed reply can't break a render.
   This replaced the kind-based caps added earlier the same day, per Jack: the
   AI should be smart enough to judge, and hard numbers fight that.
+- **Cut-quality repair (3 changes).** Removing the pacing rules left a vacuum —
+  the editor had no numbers AND no craft to replace them, and the cutting got
+  worse than baseline. Three fixes, all kind-agnostic per Jack ("no matter what
+  the AI decides it's going to be, I need the AI to be able to cut correctly"):
+  1. **Motion beats reach the editor.** Ingest already measured where each clip
+     spikes and threw the answer away. It now stores those seconds on
+     `media_assets.motion_peaks`, and the compose prompt lists the beats inside
+     every moment. Revision prompts get them too, so a re-cut doesn't cut worse
+     than the original. Migration: `supabase/v9-motion-peaks.sql`.
+  2. **Cut craft replaces the pacing rules.** One universal section, no
+     per-kind numbers: every cut lands on a real beat (impact, landing,
+     release, finish, direction change); no beat to cut on means hold longer; a
+     shot holds a COMPLETE action, starting ~0.5s before the beat; shot count
+     follows the footage's energy and every shot earns its place; fast means
+     choosing short complete actions, never truncating long ones.
+  3. **The director's clip assignment is enforced in code.** It was a prompt
+     hint the editor could ignore, so pieces wandered into other clusters'
+     footage. Segments are now filtered to the assigned clips after validation
+     — in code, so the prompt still shows every moment and the cached prefix
+     stays identical across pieces. Safety net: if enforcing would empty the
+     piece, the editor's cut is kept instead.
 - **Bug fix:** every non-"single" piece had inherited the montage's hard 6s
   per-shot cap, so a teaching or story piece could never show a full rep. That
   was the root cause of "it didn't let any drill play out."

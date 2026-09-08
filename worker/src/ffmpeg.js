@@ -113,12 +113,11 @@ async function motionTimeline(localPath) {
   return points;
 }
 
-// Choose timestamps: dense (~0.5s) inside a +/-2s window around each motion
-// peak, sparse (~3.5s) everywhere else, capped at maxFrames with peak-adjacent
-// frames winning the cap.
-function pickTimestamps(timeline, duration, maxFrames) {
-  if (!timeline.length) return null;
-  const dur = duration || timeline[timeline.length - 1].t || 60;
+// The seconds where the clip's energy spikes — a jump, a swing, a sprint, a
+// ball leaving a hand. "Peak" = above the 85th percentile of motion energy,
+// with peaks forced at least 1.5s apart so one long action reads as one beat.
+function findPeaks(timeline) {
+  if (!timeline.length) return [];
   const sorted = timeline.map((p) => p.e).sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)] || 0;
   const p85 = sorted[Math.floor(sorted.length * 0.85)] || median;
@@ -132,6 +131,26 @@ function pickTimestamps(timeline, duration, maxFrames) {
     )
       peaks.push(Math.round(p.t * 10) / 10);
   }
+  return peaks;
+}
+
+// Measure a clip once and report only where the action is. Stored at ingest so
+// the editor can be TOLD where the beats are instead of guessing from stills.
+export async function motionPeaks(localPath) {
+  try {
+    return findPeaks(await motionTimeline(localPath));
+  } catch {
+    return [];
+  }
+}
+
+// Choose timestamps: dense (~0.5s) inside a +/-2s window around each motion
+// peak, sparse (~3.5s) everywhere else, capped at maxFrames with peak-adjacent
+// frames winning the cap.
+function pickTimestamps(timeline, duration, maxFrames) {
+  if (!timeline.length) return null;
+  const dur = duration || timeline[timeline.length - 1].t || 60;
+  const peaks = findPeaks(timeline);
 
   const times = new Set();
   // Never ask for a frame at the exact end: ffmpeg seeks past the last frame
