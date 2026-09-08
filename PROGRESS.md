@@ -1,6 +1,54 @@
 # Sideline — Build Progress
 
-## Phase 3 — The AI Brain (in progress)
+## Phase 3 — RESET to the baseline (2026-09-08)
+
+Everything below this section describes work that has been **reverted**.
+`worker/src/stages.js` and `worker/src/ffmpeg.js` are back to commit `8d3310a`
+— the state whose output Jack accepted — plus the one confirmed fix that came
+after it (`sanitizeForBurn`, the emoji/tofu fix he verified). `claude.js` keeps
+prompt caching and truncation salvage: neither can change what the model
+produces for a given prompt, only what it costs and whether a cut-off reply is
+recoverable.
+
+**What went wrong.** Five changes that alter how the AI decides were stacked on
+top of each other with no measurement between any of them: thinking blocks
+(3.2), motion-adaptive frame sampling (3.7), removal of the numeric pacing
+rules, cut craft v1 (with motion beats + code-enforced clip assignment), and
+cut craft v2 (with an overlap guard). The only feedback signal was Jack
+watching the reels — minutes and ~$0.50 per data point, entirely subjective.
+With a loop that slow and that noisy, errors accumulate faster than they can be
+detected. They did.
+
+**The finding that matters most: the numeric pacing rules were load-bearing.**
+The baseline told the composer to build `3-6` or `5-10` segments and capped
+non-single shots at 6s. Jack objected to time rules on principle — a reasonable
+design instinct — and they were removed. Output got worse immediately and never
+recovered. They are back, because the version that had them is the version that
+worked. Whether they can be replaced by something better is now an open
+question to be answered with measurement, not argued from principle.
+
+**Three deterministic bugs Jack found in the last batch of 7 pieces**, none of
+which are AI judgment problems — they are missing guardrails, and they can ship
+broken output no matter how good the AI's decisions are:
+1. *Captions overprinting.* The hook burns at y=1380 at 54px and wraps to up to
+   3 lines (~150px tall); the body burns at y=1470. Any hook longer than one
+   line that overlaps a body beat in time renders text on top of text. Nothing
+   in the pipeline forbids two captions being on screen at once.
+2. *Two-second reels.* There is no minimum piece length anywhere — a single
+   surviving 2s segment ships as a finished reel. (Cut craft v2's overlap guard
+   made this reachable by dropping segments after validation.)
+3. *Copy describing the wrong exercise.* The composer picks segments from one
+   moment while writing copy influenced by another moment's transcript. No code
+   ties the copy to the footage actually used.
+
+**The plan from here**, in order, one at a time with verification between:
+`revert (this commit)` → `guardrails for the three bugs above` → `an automatic
+structural checker so quality stops depending on Jack watching reels` → the
+Phase 3 **data** items only (3.3, 3.4, 3.5, 3.6, 3.8, 3.9). Item 3.7 stays out
+until the checker can show it helps. This matches what Jack asked for: make the
+data better without messing with the AI.
+
+## Phase 3 — The AI Brain (REVERTED — kept below as the record of what was tried)
 
 - **Baseline saved** — `BASELINE-BEFORE-PHASE-3.md` captures session
   `ec978e5a` (3 videos, empty prompt): the director's full plan, all three

@@ -70,238 +70,25 @@ export async function extractAudioWav(localPath, outPath) {
   return outPath;
 }
 
-// ——— Motion-adaptive frame sampling ———
-// A fixed-interval sampler shows the AI a lot of nothing: an athlete standing
-// still bills the same as the moment they leave the ground. This measures where
-// the clip ACTUALLY moves, then spends frames there.
-
-// Measure motion energy across the clip: downscale hard, difference each frame
-// against the previous, and read the average brightness of that difference.
-// High value = something genuinely moved.
-async function motionTimeline(localPath) {
-  let text = "";
-  try {
-    const { stdout, stderr } = await run(
-      "ffmpeg",
-      [
-        "-nostdin", "-hide_banner", "-loglevel", "info",
-        "-i", localPath,
-        "-vf",
-        "fps=5,scale=160:-2,tblend=all_mode=difference,signalstats,metadata=print:file=-",
-        "-an", "-f", "null", "-",
-      ],
-      OPTS
-    );
-    text = String(stdout || "") + String(stderr || "");
-  } catch (e) {
-    text = String(e.stdout || "") + String(e.stderr || "");
-  }
-  const points = [];
-  let t = null;
-  for (const line of text.split("\n")) {
-    const mt = line.match(/pts_time:([\d.]+)/);
-    if (mt) {
-      t = Number(mt[1]);
-      continue;
-    }
-    const my = line.match(/lavfi\.signalstats\.YAVG=([\d.]+)/);
-    if (my && t !== null) {
-      points.push({ t, e: Number(my[1]) });
-      t = null;
-    }
-  }
-  return points;
-}
-
-// The seconds where the clip's energy spikes — a jump, a swing, a sprint, a
-// ball leaving a hand. "Peak" = above the 85th percentile of motion energy,
-// with peaks forced at least 1.5s apart so one long action reads as one beat.
-function findPeaks(timeline) {
-  if (!timeline.length) return [];
-  const sorted = timeline.map((p) => p.e).sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)] || 0;
-  const p85 = sorted[Math.floor(sorted.length * 0.85)] || median;
-  const threshold = Math.max(p85, median * 1.6);
-
-  const peaks = [];
-  for (const p of timeline) {
-    if (
-      p.e >= threshold &&
-      (!peaks.length || p.t - peaks[peaks.length - 1] >= 1.5)
-    )
-      peaks.push(Math.round(p.t * 10) / 10);
-  }
-  return peaks;
-}
-
-// Measure a clip once and report only where the action is. Stored at ingest so
-// the editor can be TOLD where the beats are instead of guessing from stills.
-export async function motionPeaks(localPath) {
-  try {
-    return findPeaks(await motionTimeline(localPath));
-  } catch {
-    return [];
-  }
-}
-
-// Turn a clip's action beats into the frame timestamps to grab: dense (~0.5s)
-// inside a +/-2s window around each peak, then spend whatever budget is LEFT
-// on even coverage of the whole clip.
-//
-// That second half matters more than it looks. The old version filled the rest
-// at a fixed 3.5s interval, so a 17s clip with one detected peak asked for 14
-// frames when it was allowed 40 — nine of them bunched around a single
-// timestamp, and the other 15 seconds of footage seen through five stills. If
-// the peak was a camera wobble rather than an athlete, the AI never really saw
-// the clip at all. Spending the budget means a missed or bogus peak costs
-// emphasis, never coverage.
-function framePlan(peaks, duration, maxFrames) {
-  const dur = duration || 60;
-
-  const times = new Set();
-  // Never ask for a frame at the exact end: ffmpeg seeks past the last frame
-  // and writes nothing (while still exiting 0).
-  const last = Math.max(0, dur - 0.3);
-  const add = (x) => {
-    const v = Math.round(Math.max(0, Math.min(x, last)) * 10) / 10;
-    times.add(v);
-  };
-  // Emphasis around the beats — but never more than half the budget. The
-  // director only gets 4 frames per clip, and a single peak's window is 9
-  // frames wide; left uncapped it would spend the entire budget inside one
-  // 4-second window and the director would plan a piece having never seen the
-  // rest of the video.
-  let dense = [];
-  for (const pk of peaks) for (let x = pk - 2; x <= pk + 2; x += 0.5) dense.push(x);
-  const denseCap = Math.floor(maxFrames / 2);
-  if (dense.length > denseCap) {
-    const stride = dense.length / denseCap;
-    const trimmed = [];
-    for (let i = 0; i < denseCap; i++) trimmed.push(dense[Math.floor(i * stride)]);
-    dense = trimmed;
-  }
-  for (const x of dense) add(x);
-
-  const remaining = Math.max(0, maxFrames - times.size);
-  const step = remaining > 0 ? Math.max(0.4, dur / (remaining + 1)) : 3.5;
-  for (let x = 0; x <= dur; x += step) add(x);
-
-  let list = [...times].sort((a, b) => a - b);
-  if (list.length > maxFrames) {
-    // Subsample evenly across the clip rather than taking peak-adjacent frames
-    // first. Peak windows are already denser in this list, so they keep
-    // proportionally more frames — but the end of the clip can never be
-    // dropped wholesale, which is what the old "priority first" pass did when
-    // a clip had several peaks near its start.
-    const stride = list.length / maxFrames;
-    const picked = [];
-    for (let i = 0; i < maxFrames; i++)
-      picked.push(list[Math.floor(i * stride)]);
-    list = [...new Set(picked)];
-  }
-  return { times: list, peaks };
-}
-
+// Sample frames ~1 per 2s, capped at maxFrames, resized to 512px wide.
 // Returns [{ path, t }] with the timestamp each frame represents.
-//
-// knownPeaks: the beats ingest already measured for this clip. Measuring costs
-// a FULL decode of the source, and three stages sample frames from the same
-// clips — so when ingest has already done the work, reuse it instead of paying
-// for the same analysis three more times.
-export async function sampleFrames(
-  localPath,
-  duration,
-  outDir,
-  maxFrames = 30,
-  knownPeaks = null
-) {
-  let picked = null;
-  if (Array.isArray(knownPeaks) && knownPeaks.length && duration) {
-    picked = framePlan(knownPeaks, duration, maxFrames);
-  } else {
-    const timeline = await motionTimeline(localPath);
-    picked = timeline.length
-      ? framePlan(
-          findPeaks(timeline),
-          duration || timeline[timeline.length - 1].t,
-          maxFrames
-        )
-      : null;
-  }
-
-  // No usable motion read (odd codec, still clip) — fall back to the old
-  // uniform sampler rather than failing the stage.
-  if (!picked || picked.times.length < 2) {
-    const interval = Math.max(1.5, (duration || 60) / maxFrames);
-    await ff([
-      "-y", "-i", localPath,
-      "-vf", `fps=1/${interval},scale=512:-2`,
-      "-q:v", "6",
-      `${outDir}/frame_%03d.jpg`,
-    ]);
-    const { readdir } = await import("node:fs/promises");
-    const files = (await readdir(outDir))
-      .filter((f) => f.startsWith("frame_"))
-      .sort()
-      .slice(0, maxFrames);
-    return files.map((f, i) => ({
-      path: `${outDir}/${f}`,
-      t: Math.round(i * interval * 10) / 10,
-    }));
-  }
-
-  console.log(
-    `    motion peaks at [${picked.peaks.join(", ")}]s — sampling ${
-      picked.times.length
-    } frames clustered there`
-  );
-
-  // Exact seeks give an exact frame->timestamp mapping, which matters because
-  // the AI cuts using these timestamps.
-  const { stat } = await import("node:fs/promises");
-  const out = [];
-  for (let i = 0; i < picked.times.length; i++) {
-    const t = picked.times[i];
-    const file = `${outDir}/frame_${String(i).padStart(3, "0")}.jpg`;
-    try {
-      await ff([
-        "-y",
-        "-ss", String(t),
-        "-i", localPath,
-        "-frames:v", "1",
-        "-vf", "scale=512:-2",
-        "-q:v", "6",
-        file,
-      ]);
-      // ffmpeg exits 0 even when a seek lands past the last frame and nothing
-      // is written, so only trust a frame that actually exists on disk.
-      const info = await stat(file).catch(() => null);
-      if (info && info.size > 0) out.push({ path: file, t });
-    } catch {
-      // Unreadable seek — skip this frame rather than fail the stage.
-    }
-  }
-  // If seeking somehow produced nothing usable, fall back rather than handing
-  // the AI an empty set.
-  if (!out.length) {
-    const interval = Math.max(1.5, (duration || 60) / maxFrames);
-    await ff([
-      "-y", "-i", localPath,
-      "-vf", `fps=1/${interval},scale=512:-2`,
-      "-q:v", "6",
-      `${outDir}/u_%03d.jpg`,
-    ]);
-    const { readdir } = await import("node:fs/promises");
-    const files = (await readdir(outDir))
-      .filter((f) => f.startsWith("u_"))
-      .sort()
-      .slice(0, maxFrames);
-    return files.map((f, i) => ({
-      path: `${outDir}/${f}`,
-      t: Math.round(i * interval * 10) / 10,
-    }));
-  }
-  return out;
+export async function sampleFrames(localPath, duration, outDir, maxFrames = 30) {
+  const interval = Math.max(1.5, (duration || 60) / maxFrames);
+  await ff([
+    "-y", "-i", localPath,
+    "-vf", `fps=1/${interval},scale=512:-2`,
+    "-q:v", "6",
+    `${outDir}/frame_%03d.jpg`,
+  ]);
+  const { readdir } = await import("node:fs/promises");
+  const files = (await readdir(outDir))
+    .filter((f) => f.startsWith("frame_"))
+    .sort()
+    .slice(0, maxFrames);
+  return files.map((f, i) => ({
+    path: `${outDir}/${f}`,
+    t: Math.round(i * interval * 10) / 10,
+  }));
 }
 
 export async function ffmpegRun(args) {

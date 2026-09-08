@@ -18,9 +18,8 @@ import {
   sampleFrames,
   posterFrame,
   ffmpegRun,
-  motionPeaks,
 } from "./ffmpeg.js";
-import { askClaude, imageBlock, extractJson, cacheable } from "./claude.js";
+import { askClaude, imageBlock, extractJson } from "./claude.js";
 
 const MOMENT_TYPES = [
   "teaching",
@@ -73,36 +72,14 @@ export async function ingest({ session }) {
     await withTmp(async (dir) => {
       const local = await downloadTo(asset.storage_path, join(dir, "in.mp4"));
       const info = await probe(local);
-      // Where the action actually spikes in this clip. The editor gets these
-      // later so its cuts can land ON a beat instead of near one.
-      const peaks = await motionPeaks(local);
-      console.log(
-        `  ${asset.id}: ${peaks.length} motion beat${
-          peaks.length === 1 ? "" : "s"
-        }${peaks.length ? ` at [${peaks.join(", ")}]s` : ""}`
-      );
-      const dims = {
-        duration_sec: info.duration,
-        width: info.width,
-        height: info.height,
-      };
-      const { error: upErr } = await db
+      await db
         .from("media_assets")
-        .update({ ...dims, motion_peaks: peaks })
+        .update({
+          duration_sec: info.duration,
+          width: info.width,
+          height: info.height,
+        })
         .eq("id", asset.id);
-      // If v9-motion-peaks.sql hasn't been run yet, the column is missing and
-      // the whole update fails — which would silently cost us the dimensions
-      // too. Fall back to writing what we can and say so out loud.
-      if (upErr) {
-        console.warn(
-          `  motion_peaks not saved (${upErr.message}) — run supabase/v9-motion-peaks.sql`
-        );
-        const { error: dimErr } = await db
-          .from("media_assets")
-          .update(dims)
-          .eq("id", asset.id);
-        if (dimErr) throw new Error(`save asset info: ${dimErr.message}`);
-      }
       if (info.hasAudio) {
         const wav = await extractAudioWav(local, join(dir, "audio.wav"));
         await uploadFrom(wav, artifactPath(asset, "wav"), "audio/wav");
@@ -121,11 +98,7 @@ const clampNum = (n, lo, hi, dflt) =>
   Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
 
 const DIRECTOR_SCHEMA = [
-  "FIRST, think it through inside a <thinking> block: what is actually IN this",
-  "footage, what does this coach need right now, which pieces the clips can",
-  "genuinely support, and why each one earns its place. Reason enough to decide",
-  "well, then STOP — never spend the whole reply thinking.",
-  "THEN close the block and return ONE JSON object with EXACTLY these fields:",
+  "Return ONE JSON object, nothing else, with EXACTLY these fields:",
   "{",
   '  "read_of_footage": "2-4 sentences: what is in the videos and how they',
   "    relate — same drill or different? multiple camera angles of the SAME",
@@ -168,8 +141,6 @@ const DIRECTOR_SCHEMA = [
   "- If no request, make a VARIED pack — do not repeat the same kind.",
   "- EVERY piece MUST have a real why_this_piece (no empty strings).",
   "- Use the EXACT asset_id strings shown above. Never invent ids.",
-  "- Keep structural_recipe under 60 words and why_this_piece to ONE sentence.",
-  "  Be concrete, not lavish — a long recipe crowds out the rest of the plan.",
 ].join("\n");
 
 function normalizePlan(raw, assets) {
@@ -250,13 +221,7 @@ export async function direct({ session }) {
     const a = assets[i];
     await withTmp(async (dir) => {
       const local = await downloadTo(a.storage_path, join(dir, "in.mp4"));
-      const frames = await sampleFrames(
-        local,
-        a.duration_sec,
-        dir,
-        framesPer,
-        a.motion_peaks
-      );
+      const frames = await sampleFrames(local, a.duration_sec, dir, framesPer);
       content.push({
         type: "text",
         text: `VIDEO ${i + 1} — asset_id: ${a.id} — duration: ${
@@ -270,23 +235,19 @@ export async function direct({ session }) {
     });
   }
 
-  // End of the stable prefix (frames + coach profile) — cached from here up,
-  // so a retry or a follow-up call on this session re-reads it cheaply.
-  content.push(
-    cacheable({
-      type: "text",
-      text: [
-        "THE COACH:",
-        `- sport / focus: ${coach.sport ?? "?"}`,
-        `- audience: ${coach.audience ?? "?"}`,
-        `- mission right now: ${coach.mission ?? "?"}`,
-        `- city: ${coach.city ?? "not set"}`,
-        coach.ig_profile
-          ? `- their Instagram brand: ${String(coach.ig_profile).slice(0, 800)}`
-          : "- Instagram brand: not scanned",
-      ].join("\n"),
-    })
-  );
+  content.push({
+    type: "text",
+    text: [
+      "THE COACH:",
+      `- sport / focus: ${coach.sport ?? "?"}`,
+      `- audience: ${coach.audience ?? "?"}`,
+      `- mission right now: ${coach.mission ?? "?"}`,
+      `- city: ${coach.city ?? "not set"}`,
+      coach.ig_profile
+        ? `- their Instagram brand: ${String(coach.ig_profile).slice(0, 800)}`
+        : "- Instagram brand: not scanned",
+    ].join("\n"),
+  });
 
   content.push({
     type: "text",
@@ -303,15 +264,9 @@ export async function direct({ session }) {
   const reply = await askClaude({
     system:
       "You are a world-class short-form video creative director for sports " +
-      "coaches. You reason inside a <thinking> block first, then reply with " +
-      "exactly one JSON object.",
+      "coaches. You reply with exactly one JSON object and no other text.",
     content,
-    // The plan is a large JSON object AND the model now reasons before it
-    // writes. At 4000 the JSON was being truncated mid-structure (visible in
-    // BASELINE-BEFORE-PHASE-3.md, where a recipe cuts off mid-word), which
-    // fails to parse. Give both the reasoning and the plan real room.
-    maxTokens: 8000,
-    label: "direct",
+    maxTokens: 4000,
   });
   const plan = normalizePlan(extractJson(reply), assets);
 
@@ -402,13 +357,7 @@ export async function understand({ session }) {
 
     const moments = await withTmp(async (dir) => {
       const local = await downloadTo(asset.storage_path, join(dir, "in.mp4"));
-      const frames = await sampleFrames(
-        local,
-        asset.duration_sec,
-        dir,
-        40,
-        asset.motion_peaks
-      );
+      const frames = await sampleFrames(local, asset.duration_sec, dir, 40);
       const content = [];
       for (const f of frames) {
         content.push({ type: "text", text: `Frame at t=${f.t}s:` });
@@ -442,11 +391,7 @@ export async function understand({ session }) {
           `  segments (20-45s) when the footage supports them. Do not return`,
           `  only sub-10s clips.`,
           `- 4-45 seconds each, within the video's duration.`,
-          `FIRST, think inside a <thinking> block: what is happening across`,
-          `these frames, where does each action actually START and FINISH, and`,
-          `which stretches are genuinely worth posting. THEN close the block and`,
-          `return ONLY a JSON array. Keep the thinking proportionate — reason`,
-          `enough to decide, then STOP and write the JSON.`,
+          `Return ONLY a JSON array, no other text:`,
           `[{"t_start": 7.5, "t_end": 20.8, "type": "teaching|hype|transformation|story|funny|technique",`,
           `  "score": 0.0-1.0, "reason": "one sentence", "hook_idea": "short hook"}]`,
         ].join("\n"),
@@ -454,13 +399,8 @@ export async function understand({ session }) {
 
       const reply = await askClaude({
         system:
-          "You are Sideline's footage analyst. You reason inside a <thinking> " +
-          "block first, then reply with valid JSON.",
+          "You are Sideline's footage analyst. You only ever reply with valid JSON.",
         content,
-        // Reasoning + a long moment list needs headroom too (same truncation
-        // risk that took down the director).
-        maxTokens: 6000,
-        label: `understand ${asset.id.slice(0, 8)}`,
       });
       return extractJson(reply);
     });
@@ -545,7 +485,6 @@ async function ensureIgProfile(coach) {
         },
       ],
       maxTokens: 600,
-      label: "ig-scan",
     });
     const summary = reply.trim().slice(0, 2000);
     const scannedAt = new Date().toISOString();
@@ -633,57 +572,37 @@ async function composePlannedPiece({
   pp,
   clusterAssets,
 }) {
-  // Every piece in a session shares the SAME stable prefix: coach profile, the
-  // full moment list, the build rules, and the output schema. Only the
-  // director's per-piece brief changes. That keeps the cached block identical
-  // across the 3-5 compose calls AND large enough to clear Anthropic's ~1k
-  // token cache minimum, so pieces 2+ read the prefix back instead of
-  // re-billing it.
-  const pool = allMoments.slice(0, 12);
-  if (!pool.length) return false;
-
-  // Which of those moments did the director assign to THIS piece?
-  const allowedAssets = new Set();
-  const allowedIdx = [];
+  // Which moments may this piece draw from?
+  let pool = allMoments;
   if (pp.cluster_ids_to_use?.length) {
+    const allowed = new Set();
     for (const cid of pp.cluster_ids_to_use)
-      for (const aid of clusterAssets[cid] ?? []) allowedAssets.add(aid);
-    pool.forEach((m, i) => {
-      if (allowedAssets.has(m.asset_id)) allowedIdx.push(i);
-    });
+      for (const aid of clusterAssets[cid] ?? []) allowed.add(aid);
+    const filtered = allMoments.filter((m) => allowed.has(m.asset_id));
+    if (filtered.length) pool = filtered;
   }
+  pool = pool.slice(0, 16);
+  if (!pool.length) return false;
 
   const momentList = pool
     .map((m, i) => {
       const a = byId[m.asset_id];
       const landscape = (a?.width ?? 0) > (a?.height ?? 0);
-      // NOTE: measured motion peaks are deliberately NOT shown here. They are
-      // whole-frame pixel-change spikes, which on handheld footage tracks the
-      // CAMERA more than the athlete — and telling the editor to trust that
-      // over what it can see in the frames made the cutting materially worse.
-      // The measurement still runs (it picks which frames to sample) and is
-      // stored on media_assets.motion_peaks, but it does not drive cuts.
       return `#${i} · asset=${m.asset_id} · ${m.t_start.toFixed(
         1
       )}s→${m.t_end.toFixed(1)}s (${(m.t_end - m.t_start).toFixed(1)}s) · ${
         landscape ? "landscape" : "vertical"
       } source · ${m.type} · ${m.reason} · said: "${(
         m.transcript_span || "(no speech)"
-      ).slice(0, 120)}"`;
+      ).slice(0, 200)}"`;
     })
     .join("\n");
 
+  const multi = String(pp.kind) !== "single";
   const target = clampNum(Number(pp.target_length_sec), 8, 60, 25);
 
-  // No pacing formulas. The editor decides shot length from the ACTION it can
-  // see — that judgment is the whole point of the director architecture. The
-  // only bound left is a safety rail so a malformed reply can't produce an
-  // absurd cut or a broken render.
-  const single = String(pp.kind) === "single";
-  const perSegCap = single ? 60 : 30;
-
-  const stablePrefix = [
-    `You are the coach's editor + ghostwriter. You build ONE piece at a time, exactly as the DIRECTOR briefs you.`,
+  const prompt = [
+    `You are the coach's editor + ghostwriter. Build the ONE piece the DIRECTOR asked for below.`,
     `Coach: name=${coach.name}; sport=${coach.sport}; tones=${(
       coach.tones ?? []
     ).join(", ")}; audience=${coach.audience}; mission=${coach.mission}.`,
@@ -697,51 +616,25 @@ async function composePlannedPiece({
       ? `Their real Instagram vibe: ${String(coach.ig_profile).slice(0, 1200)}`
       : ``,
     ``,
-    `EVERY MOMENT FOUND IN THIS SESSION — pick sub-ranges from INSIDE these, by index:`,
+    `THE DIRECTOR'S BRIEF FOR THIS PIECE (follow it):`,
+    `- kind: ${pp.kind}`,
+    `- why it exists (keep this intent alive in the copy): ${pp.why_this_piece}`,
+    `- target length: ~${target}s`,
+    `- structural recipe to realize: ${pp.structural_recipe}`,
+    ``,
+    `Available moments — pick sub-ranges from INSIDE these (use the index numbers):`,
     momentList,
     ``,
-    `CUT CRAFT — this is the job, and it is the SAME craft for every kind of`,
-    `piece. Hype, teaching, story: the rules below never change.`,
-    `- Judge from the FRAMES. You can see the athlete: where the wind-up starts,`,
-    `  where the throw releases, where the rep finishes. That read is the only`,
-    `  thing that decides where a cut goes.`,
-    `- A shot holds ONE COMPLETE action, beginning to end: start in the wind-up,`,
-    `  hold through the release, end after it resolves. Cutting away just before`,
-    `  the throw, the jump or the contact is the single worst thing you can do —`,
-    `  the payoff is the ONLY reason the shot exists.`,
-    `- NEVER show the same action twice. If two moments cover the same rep, pick`,
-    `  ONE. A viewer who sees the same throw again assumes the video is broken.`,
-    `- If a stretch of footage has no complete action in it, do not cut to it at`,
-    `  all — hold the shot you are on for longer instead.`,
-    `- YOU decide how long each shot holds and how many shots the piece needs.`,
-    `  There is no target count and no formula: shot count follows the ENERGY`,
-    `  of the footage, and every shot must earn its place. Three long chunks is`,
-    `  not a montage; twenty jitter cuts is not a teaching piece.`,
-    `- Fast does not mean truncated. A piece feels fast because you CHOOSE`,
-    `  short, punchy COMPLETE actions — never because you clipped a long one in`,
-    `  half.`,
-    `- An instructional or single-clip piece usually wants ONE continuous shot.`,
-    `  Cutting inside a demonstration for no reason destroys it.`,
+    multi
+      ? `Build ${
+          target < 20 ? "3-6" : "5-10"
+        } segments across the moments that realize the recipe. Each segment names the transition INTO the next: "cut" (hard cut, default), "fade" (mood shift), "slideleft"/"slideright" (whip to new angle), "circleopen" (reveal). Mostly cuts and fades; at most 1-2 specialty wipes.`
+      : `Build exactly ONE segment — a single clean cut that realizes the recipe (hook early, land the payoff).`,
+    `Aim for ~${target}s total, never over 60s. Multi-clip segments run 1-6s each; a single cut may run longer.`,
+    `Write the copy in the coach's voice, shaped by the kind and the intent above.`,
+    `Caption beats land inside the cut (t=0 = cut start): a hook beat in the first 2-3s, then 1-3 body beats.`,
     ``,
-    `EVERYTHING ELSE:`,
-    `- Each segment names the transition INTO the next: "cut" (hard cut,`,
-    `  default), "fade" (mood shift), "slideleft"/"slideright" (whip to a new`,
-    `  angle), "circleopen" (reveal). Mostly cuts and fades; at most 1-2`,
-    `  specialty wipes.`,
-    `- Never over 60s total.`,
-    `- Write the copy in the coach's voice, shaped by the piece's kind and the`,
-    `  intent behind it.`,
-    `- Caption beats land inside the cut (t=0 = cut start): a hook beat in the`,
-    `  first 2-3s, then 1-3 body beats.`,
-    ``,
-    `FIRST, think inside a <thinking> block: which exact moments realize this`,
-    `recipe, where each cut should land, and what this specific piece should say`,
-    `that none of the coach's other pieces would.`,
-    `HARD LIMIT: the <thinking> block must be UNDER 120 WORDS. Terse notes, not`,
-    `prose — you are deciding, not explaining. Do not restate the moment list,`,
-    `do not draft the copy twice, do not weigh options you have already ruled`,
-    `out. Close the block and spend the rest of your reply on the JSON.`,
-    `THEN return ONLY one JSON object:`,
+    `Return ONLY one JSON object:`,
     `{"segments": [{"moment_index": 0, "in": <abs s>, "out": <abs s>, "transition": "cut"}],`,
     ` "captions": [{"text":"HOOK.","t0":0,"t1":2.2,"style":"hook"},{"text":"body beat","t0":3,"t1":6,"style":"body"}],`,
     ` "hook":"...", "caption":"1-4 sentences in the coach's voice", "hashtags":"#four #to #six #tags",`,
@@ -751,49 +644,17 @@ async function composePlannedPiece({
     .filter(Boolean)
     .join("\n");
 
-  const pieceBrief = [
-    `THE DIRECTOR'S BRIEF FOR THIS PIECE (follow it):`,
-    `- kind: ${pp.kind}`,
-    `- why it exists (keep this intent alive in the copy): ${pp.why_this_piece}`,
-    `- target length: ~${target}s`,
-    `- structural recipe to realize: ${pp.structural_recipe}`,
-    allowedIdx.length
-      ? `- the director assigned this piece these moment indexes: ${allowedIdx.join(
-          ", "
-        )} — build from those unless the recipe clearly calls for another.`
-      : `- any moment listed above may be used.`,
-    ``,
-    single
-      ? `Build exactly ONE continuous segment that realizes the recipe (hook early, land the payoff).`
-      : `Use however many shots this piece actually needs — no target count.` +
-        ` Let the kind and the footage decide the rhythm.`,
-    `Aim for roughly ${target}s total, but serve the action over the number.`,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
   const reply = await askClaude({
     system:
-      "You are an elite short-form sports video editor and ghostwriter. You realize the director's recipe precisely. You reason inside a <thinking> block first, then reply with exactly one valid JSON object.",
-    content: [
-      cacheable({ type: "text", text: stablePrefix }),
-      { type: "text", text: pieceBrief },
-    ],
-    // Headroom for the <thinking> block so a long reasoning pass can never
-    // truncate the JSON that follows it. (At 4000 the model spent the whole
-    // budget reasoning and never emitted JSON.)
-    maxTokens: 8000,
-    // The rough prefix size rides along in the label: if caching ever stops
-    // engaging, this says immediately whether the block fell under the ~1k
-    // token minimum.
-    label: `compose ${pp.piece_id} (prefix~${Math.round(
-      stablePrefix.length / 4
-    )}t)`,
+      "You are an elite short-form sports video editor and ghostwriter. You realize the director's recipe precisely and reply with exactly one valid JSON object.",
+    content: [{ type: "text", text: prompt }],
+    maxTokens: 3000,
   });
   const draft = extractJson(reply);
 
   const TRANSITIONS = ["cut", "fade", "slideleft", "slideright", "circleopen"];
-  let segments = (Array.isArray(draft.segments) ? draft.segments : [])
+  let total = 0;
+  const segments = (Array.isArray(draft.segments) ? draft.segments : [])
     .map((seg) => {
       const m = pool[Number(seg.moment_index)];
       if (!m) return null;
@@ -801,8 +662,7 @@ async function composePlannedPiece({
       const lo = Math.max(0, m.t_start - 1);
       const hi = Math.min(m.t_end + 1, a?.duration_sec ?? m.t_end + 1);
       const start = Math.max(lo, Math.min(Number(seg.in), hi - 1));
-      // perSegCap is a safety rail, not a pacing rule — it only stops a
-      // malformed reply from producing an absurd shot.
+      const perSegCap = multi ? 6 : 60;
       const end = Math.min(
         hi,
         Math.max(start + 1, Math.min(Number(seg.out), start + perSegCap))
@@ -818,41 +678,12 @@ async function composePlannedPiece({
           : "cut",
       };
     })
-    .filter(Boolean);
-
-  // Hard-filtering segments to the director's assigned clips was tried and
-  // reverted: when the director assigns a single clip to a multi-shot piece,
-  // enforcement forces every shot to come from that one video, and the piece
-  // replays the same footage. The assignment stays a strong prompt hint.
-
-  // Never show the same action twice. Two moments returned by `understand` can
-  // cover the same rep, and a piece that cuts to both plays the throw, then
-  // plays it again — which reads as a broken video. Drop any segment that
-  // substantially re-covers ground an earlier segment already used.
-  const kept = [];
-  for (const seg of segments) {
-    const dup = kept.some((k) => {
-      if (k.asset_id !== seg.asset_id) return false;
-      const overlap =
-        Math.min(k.out, seg.out) - Math.max(k.in, seg.in);
-      return overlap > 0.5 * Math.min(k.out - k.in, seg.out - seg.in);
+    .filter(Boolean)
+    .filter((seg) => {
+      if (total >= 60) return false;
+      total += seg.out - seg.in;
+      return true;
     });
-    if (!dup) kept.push(seg);
-  }
-  if (kept.length < segments.length)
-    console.log(
-      `    ${pp.piece_id}: dropped ${
-        segments.length - kept.length
-      } repeated segment(s) covering an action already shown`
-    );
-  segments = kept;
-
-  let total = 0;
-  segments = segments.filter((seg) => {
-    if (total >= 60) return false;
-    total += seg.out - seg.in;
-    return true;
-  });
   if (!segments.length) return false;
 
   const captions = (Array.isArray(draft.captions) ? draft.captions : [])
@@ -1252,13 +1083,7 @@ export async function revise({ session }) {
         const a = byId[aid];
         await withTmp(async (dir) => {
           const local = await downloadTo(a.storage_path, join(dir, "in.mp4"));
-          const frames = await sampleFrames(
-            local,
-            a.duration_sec,
-            dir,
-            3,
-            a.motion_peaks
-          );
+          const frames = await sampleFrames(local, a.duration_sec, dir, 3);
           content.push({
             type: "text",
             text: `SOURCE ${aid} — ${Math.round(a.duration_sec ?? 0)}s · ${
@@ -1271,10 +1096,6 @@ export async function revise({ session }) {
           }
         });
       }
-      // Frames are the expensive part of a revision — cache up to the last one
-      // so repeat revisions on the same piece re-read them instead of re-billing.
-      if (content.length > 1)
-        content[content.length - 1] = cacheable(content[content.length - 1]);
 
       content.push({
         type: "text",
@@ -1310,18 +1131,12 @@ export async function revise({ session }) {
           `"${note}"`,
           ``,
           `Rules: cuts may move anywhere inside the source durations. Reels max`,
-          `60s, stories max 15s. A single clean cut is ONE segment. Each segment`,
-          `names a "transition" (cut|fade|slideleft|slideright|circleopen).`,
-          `NEVER cut in the middle of a rep — a shot starts in the wind-up and`,
-          `ends after the action resolves. Cutting away just before the throw,`,
-          `the jump or the contact is the worst thing you can do. Never show the`,
-          `same action twice. YOU decide shot lengths from the action itself;`,
-          `there is no formula. Caption beats stay inside the cut (t=0 = start).`,
+          `60s, stories max 15s. A single clean cut is ONE segment; multi-clip`,
+          `segments run 1-6s each with a "transition" per segment`,
+          `(cut|fade|slideleft|slideright|circleopen). Caption beats stay inside`,
+          `the cut (t=0 = start).`,
           ``,
-          `FIRST, think inside a <thinking> block: what EXACTLY is the coach`,
-          `asking to change, what must stay untouched, and what the new cut needs`,
-          `to look like. Keep it brief. THEN close the block and return ONLY`,
-          `this JSON object:`,
+          `Return ONLY this JSON object:`,
           `{"edl": {"segments": [{"asset_id": "...", "in": 0, "out": 3, "transition": "cut"}],`,
           `  "crop": {"mode": "center|eased", "start_x_frac": 0.5},`,
           `  "captions": [{"text": "...", "t0": 0, "t1": 2.4, "style": "hook|body"}]},`,
@@ -1334,11 +1149,9 @@ export async function revise({ session }) {
 
       const reply = await askClaude({
         system:
-          "You are a precise short-form video editor. You apply the coach's notes faithfully with real eyes on the footage. You reason inside a <thinking> block first, then reply with exactly one valid JSON object.",
+          "You are a precise short-form video editor. You apply the coach's notes faithfully with real eyes on the footage, and reply with exactly one valid JSON object.",
         content,
-        // Room for reasoning plus the revised cut.
-        maxTokens: 6000,
-        label: `revise ${piece.id.slice(0, 8)}`,
+        maxTokens: 4000,
       });
       const draft = extractJson(reply);
 
