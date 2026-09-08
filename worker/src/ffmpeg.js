@@ -144,13 +144,11 @@ export async function motionPeaks(localPath) {
   }
 }
 
-// Choose timestamps: dense (~0.5s) inside a +/-2s window around each motion
-// peak, sparse (~3.5s) everywhere else, capped at maxFrames with peak-adjacent
-// frames winning the cap.
-function pickTimestamps(timeline, duration, maxFrames) {
-  if (!timeline.length) return null;
-  const dur = duration || timeline[timeline.length - 1].t || 60;
-  const peaks = findPeaks(timeline);
+// Turn a clip's action beats into the frame timestamps to grab: dense (~0.5s)
+// inside a +/-2s window around each peak, sparse (~3.5s) everywhere else,
+// capped at maxFrames with peak-adjacent frames winning the cap.
+function framePlan(peaks, duration, maxFrames) {
+  const dur = duration || 60;
 
   const times = new Set();
   // Never ask for a frame at the exact end: ffmpeg seeks past the last frame
@@ -179,9 +177,31 @@ function pickTimestamps(timeline, duration, maxFrames) {
 }
 
 // Returns [{ path, t }] with the timestamp each frame represents.
-export async function sampleFrames(localPath, duration, outDir, maxFrames = 30) {
-  const timeline = await motionTimeline(localPath);
-  const picked = pickTimestamps(timeline, duration, maxFrames);
+//
+// knownPeaks: the beats ingest already measured for this clip. Measuring costs
+// a FULL decode of the source, and three stages sample frames from the same
+// clips — so when ingest has already done the work, reuse it instead of paying
+// for the same analysis three more times.
+export async function sampleFrames(
+  localPath,
+  duration,
+  outDir,
+  maxFrames = 30,
+  knownPeaks = null
+) {
+  let picked = null;
+  if (Array.isArray(knownPeaks) && knownPeaks.length && duration) {
+    picked = framePlan(knownPeaks, duration, maxFrames);
+  } else {
+    const timeline = await motionTimeline(localPath);
+    picked = timeline.length
+      ? framePlan(
+          findPeaks(timeline),
+          duration || timeline[timeline.length - 1].t,
+          maxFrames
+        )
+      : null;
+  }
 
   // No usable motion read (odd codec, still clip) — fall back to the old
   // uniform sampler rather than failing the stage.

@@ -49,6 +49,15 @@
      — in code, so the prompt still shows every moment and the cached prefix
      stays identical across pieces. Safety net: if enforcing would empty the
      piece, the editor's cut is kept instead.
+- **Perf fix (my own regression, caught on the next run).** Measuring a clip's
+  beats costs a FULL decode of the source, and three stages sample frames from
+  the same clips — so adding the ingest measurement took a 3-video session from
+  6 analysis passes to 9, and Jack noticed the slowdown immediately. Ingest now
+  measures once and `sampleFrames` takes those stored peaks, so direct,
+  understand and revise skip the analysis entirely: **9 passes → 3**, faster
+  than before Phase 3 started. Verified the reused-peak frame plan is identical
+  to the freshly-measured one, and a clip with no stored peaks still falls back
+  to measuring.
 - **Bug fix:** every non-"single" piece had inherited the montage's hard 6s
   per-shot cap, so a teaching or story piece could never show a full rep. That
   was the root cause of "it didn't let any drill play out."

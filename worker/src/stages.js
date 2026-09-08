@@ -250,7 +250,13 @@ export async function direct({ session }) {
     const a = assets[i];
     await withTmp(async (dir) => {
       const local = await downloadTo(a.storage_path, join(dir, "in.mp4"));
-      const frames = await sampleFrames(local, a.duration_sec, dir, framesPer);
+      const frames = await sampleFrames(
+        local,
+        a.duration_sec,
+        dir,
+        framesPer,
+        a.motion_peaks
+      );
       content.push({
         type: "text",
         text: `VIDEO ${i + 1} — asset_id: ${a.id} — duration: ${
@@ -396,7 +402,13 @@ export async function understand({ session }) {
 
     const moments = await withTmp(async (dir) => {
       const local = await downloadTo(asset.storage_path, join(dir, "in.mp4"));
-      const frames = await sampleFrames(local, asset.duration_sec, dir, 40);
+      const frames = await sampleFrames(
+        local,
+        asset.duration_sec,
+        dir,
+        40,
+        asset.motion_peaks
+      );
       const content = [];
       for (const f of frames) {
         content.push({ type: "text", text: `Frame at t=${f.t}s:` });
@@ -1228,7 +1240,13 @@ export async function revise({ session }) {
         const a = byId[aid];
         await withTmp(async (dir) => {
           const local = await downloadTo(a.storage_path, join(dir, "in.mp4"));
-          const frames = await sampleFrames(local, a.duration_sec, dir, 3);
+          const frames = await sampleFrames(
+            local,
+            a.duration_sec,
+            dir,
+            3,
+            a.motion_peaks
+          );
           const beats = (Array.isArray(a.motion_peaks) ? a.motion_peaks : [])
             .slice(0, 12)
             .join(", ");
