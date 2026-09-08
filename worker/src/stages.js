@@ -657,19 +657,19 @@ async function composePlannedPiece({
     .map((m, i) => {
       const a = byId[m.asset_id];
       const landscape = (a?.width ?? 0) > (a?.height ?? 0);
-      // The measured action beats that fall inside this moment (same +/-1s
-      // window the cut is allowed to use). These are where the clip actually
-      // moves — the editor cuts to them instead of guessing.
-      const beats = (Array.isArray(a?.motion_peaks) ? a.motion_peaks : [])
-        .filter((t) => t >= m.t_start - 1 && t <= m.t_end + 1)
-        .slice(0, 8);
+      // NOTE: measured motion peaks are deliberately NOT shown here. They are
+      // whole-frame pixel-change spikes, which on handheld footage tracks the
+      // CAMERA more than the athlete — and telling the editor to trust that
+      // over what it can see in the frames made the cutting materially worse.
+      // The measurement still runs (it picks which frames to sample) and is
+      // stored on media_assets.motion_peaks, but it does not drive cuts.
       return `#${i} · asset=${m.asset_id} · ${m.t_start.toFixed(
         1
       )}s→${m.t_end.toFixed(1)}s (${(m.t_end - m.t_start).toFixed(1)}s) · ${
         landscape ? "landscape" : "vertical"
-      } source · ${m.type} · ${m.reason} · beats: ${
-        beats.length ? `[${beats.join(", ")}]s` : "none measured"
-      } · said: "${(m.transcript_span || "(no speech)").slice(0, 120)}"`;
+      } source · ${m.type} · ${m.reason} · said: "${(
+        m.transcript_span || "(no speech)"
+      ).slice(0, 120)}"`;
     })
     .join("\n");
 
@@ -702,23 +702,26 @@ async function composePlannedPiece({
     ``,
     `CUT CRAFT — this is the job, and it is the SAME craft for every kind of`,
     `piece. Hype, teaching, story: the rules below never change.`,
-    `- "beats" above are MEASURED: the exact seconds the action spikes (a jump,`,
-    `  a swing, a release, a sprint, contact). Trust them over the timestamps in`,
-    `  the reason text.`,
-    `- EVERY cut lands on a real beat — the impact, the landing, the release,`,
-    `  the finish, a hard change of direction. Cutting on nothing is what makes`,
-    `  an edit feel amateur. If a shot has no beat left to cut on, HOLD IT`,
-    `  LONGER until it does.`,
-    `- A shot contains a COMPLETE action: start ~0.5s BEFORE the beat so the`,
-    `  viewer sees it coming, end just AFTER it resolves. NEVER cut mid-rep. A`,
-    `  drill the viewer never sees finish is a wasted shot.`,
+    `- Judge from the FRAMES. You can see the athlete: where the wind-up starts,`,
+    `  where the throw releases, where the rep finishes. That read is the only`,
+    `  thing that decides where a cut goes.`,
+    `- A shot holds ONE COMPLETE action, beginning to end: start in the wind-up,`,
+    `  hold through the release, end after it resolves. Cutting away just before`,
+    `  the throw, the jump or the contact is the single worst thing you can do —`,
+    `  the payoff is the ONLY reason the shot exists.`,
+    `- NEVER show the same action twice. If two moments cover the same rep, pick`,
+    `  ONE. A viewer who sees the same throw again assumes the video is broken.`,
+    `- If a stretch of footage has no complete action in it, do not cut to it at`,
+    `  all — hold the shot you are on for longer instead.`,
     `- YOU decide how long each shot holds and how many shots the piece needs.`,
     `  There is no target count and no formula: shot count follows the ENERGY`,
     `  of the footage, and every shot must earn its place. Three long chunks is`,
     `  not a montage; twenty jitter cuts is not a teaching piece.`,
     `- Fast does not mean truncated. A piece feels fast because you CHOOSE`,
-    `  short, punchy complete actions — never because you clipped a long one in`,
+    `  short, punchy COMPLETE actions — never because you clipped a long one in`,
     `  half.`,
+    `- An instructional or single-clip piece usually wants ONE continuous shot.`,
+    `  Cutting inside a demonstration for no reason destroys it.`,
     ``,
     `EVERYTHING ELSE:`,
     `- Each segment names the transition INTO the next: "cut" (hard cut,`,
@@ -757,7 +760,7 @@ async function composePlannedPiece({
     allowedIdx.length
       ? `- the director assigned this piece these moment indexes: ${allowedIdx.join(
           ", "
-        )}. Build from THOSE ONLY — segments from any other moment are dropped.`
+        )} — build from those unless the recipe clearly calls for another.`
       : `- any moment listed above may be used.`,
     ``,
     single
@@ -817,23 +820,32 @@ async function composePlannedPiece({
     })
     .filter(Boolean);
 
-  // The director assigned this piece specific clips. Enforce that HERE rather
-  // than by trimming the prompt: the prompt keeps showing every moment (so the
-  // cached prefix stays identical across pieces) while the cut still lands only
-  // on the footage this piece was briefed for. Safety net — if enforcing would
-  // leave nothing, keep the composer's cut instead of losing the piece.
-  if (allowedAssets.size) {
-    const onBrief = segments.filter((s) => allowedAssets.has(s.asset_id));
-    if (onBrief.length) {
-      if (onBrief.length < segments.length)
-        console.log(
-          `    ${pp.piece_id}: dropped ${
-            segments.length - onBrief.length
-          } segment(s) from footage the director didn't assign`
-        );
-      segments = onBrief;
-    }
+  // Hard-filtering segments to the director's assigned clips was tried and
+  // reverted: when the director assigns a single clip to a multi-shot piece,
+  // enforcement forces every shot to come from that one video, and the piece
+  // replays the same footage. The assignment stays a strong prompt hint.
+
+  // Never show the same action twice. Two moments returned by `understand` can
+  // cover the same rep, and a piece that cuts to both plays the throw, then
+  // plays it again — which reads as a broken video. Drop any segment that
+  // substantially re-covers ground an earlier segment already used.
+  const kept = [];
+  for (const seg of segments) {
+    const dup = kept.some((k) => {
+      if (k.asset_id !== seg.asset_id) return false;
+      const overlap =
+        Math.min(k.out, seg.out) - Math.max(k.in, seg.in);
+      return overlap > 0.5 * Math.min(k.out - k.in, seg.out - seg.in);
+    });
+    if (!dup) kept.push(seg);
   }
+  if (kept.length < segments.length)
+    console.log(
+      `    ${pp.piece_id}: dropped ${
+        segments.length - kept.length
+      } repeated segment(s) covering an action already shown`
+    );
+  segments = kept;
 
   let total = 0;
   segments = segments.filter((seg) => {
@@ -1247,16 +1259,11 @@ export async function revise({ session }) {
             3,
             a.motion_peaks
           );
-          const beats = (Array.isArray(a.motion_peaks) ? a.motion_peaks : [])
-            .slice(0, 12)
-            .join(", ");
           content.push({
             type: "text",
-            text:
-              `SOURCE ${aid} — ${Math.round(a.duration_sec ?? 0)}s · ${
-                (a.width ?? 0) > (a.height ?? 0) ? "landscape" : "vertical"
-              }` +
-              (beats ? ` · measured action beats at [${beats}]s` : ""),
+            text: `SOURCE ${aid} — ${Math.round(a.duration_sec ?? 0)}s · ${
+              (a.width ?? 0) > (a.height ?? 0) ? "landscape" : "vertical"
+            }`,
           });
           for (const f of frames) {
             content.push({ type: "text", text: `  frame at t=${f.t}s:` });
@@ -1305,13 +1312,11 @@ export async function revise({ session }) {
           `Rules: cuts may move anywhere inside the source durations. Reels max`,
           `60s, stories max 15s. A single clean cut is ONE segment. Each segment`,
           `names a "transition" (cut|fade|slideleft|slideright|circleopen).`,
-          `NEVER cut in the middle of a rep — a shot starts just before the`,
-          `action and ends just after it finishes. YOU decide shot lengths from`,
-          `the action itself; there is no formula. Land every cut on a real`,
-          `beat (impact, landing, release, finish, hard direction change) — the`,
-          `measured beats listed with each SOURCE are where the clip actually`,
-          `moves. No beat to cut on? Hold the shot longer. Caption beats stay`,
-          `inside the cut (t=0 = start).`,
+          `NEVER cut in the middle of a rep — a shot starts in the wind-up and`,
+          `ends after the action resolves. Cutting away just before the throw,`,
+          `the jump or the contact is the worst thing you can do. Never show the`,
+          `same action twice. YOU decide shot lengths from the action itself;`,
+          `there is no formula. Caption beats stay inside the cut (t=0 = start).`,
           ``,
           `FIRST, think inside a <thinking> block: what EXACTLY is the coach`,
           `asking to change, what must stay untouched, and what the new cut needs`,

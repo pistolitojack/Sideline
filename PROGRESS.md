@@ -49,6 +49,35 @@
      — in code, so the prompt still shows every moment and the cached prefix
      stays identical across pieces. Safety net: if enforcing would empty the
      piece, the editor's cut is kept instead.
+- **Changes 1 and 3 above were REVERTED after the first real run** — they made
+  the cutting worse, not better. Jack's three pieces all failed the same way:
+  cuts landing *just before* the throw, and the same action shown twice.
+  - **Why the beats hurt.** `tblend=difference` + `signalstats` measures
+    WHOLE-FRAME pixel change. On handheld phone footage the camera moves more
+    of the frame than the athlete does, so the "beats" track camera motion at
+    least as much as action. Worse, `findPeaks` returns the *leading edge* of a
+    spike (verified: synthetic spikes at 4.0/9.5/15.0s report as
+    3.8/9.2/14.8s), and the prompt then said to start ~0.5s BEFORE the beat and
+    gave no end-of-action data at all — so shots began ~1s early and ended as
+    the action started. That is exactly "it cut right before he threw it." The
+    prompt also said to trust the beats *over* the model's read of the frames,
+    which put an unvalidated proxy signal above the one input that actually
+    sees the athlete. The measurement still runs and is still stored; it just
+    no longer touches the prompt.
+  - **Why the enforcement hurt.** When the director assigns ONE clip to a
+    multi-shot piece, hard-filtering forces every shot to come from that one
+    video — the montage replays the same footage. Back to a prompt hint.
+  - **Kept and reworded:** the cut-craft section, now framed around what the
+    model can SEE ("start in the wind-up, hold through the release, end after
+    it resolves"), plus an explicit ban on showing the same action twice and on
+    cutting inside a single-clip demonstration.
+  - **Added:** a code-level overlap guard. Two moments from `understand` can
+    cover the same rep; any segment overlapping an earlier one on the same clip
+    by more than half its length is dropped. Verified it kills exact, offset
+    and nested repeats while preserving adjacent shots, small overlaps and
+    A/B/A multi-angle cuts.
+  - **Lesson:** the motion signal was never validated against real footage
+    before it was wired into the prompt. Measure first, ship second.
 - **Perf fix (my own regression, caught on the next run).** Measuring a clip's
   beats costs a FULL decode of the source, and three stages sample frames from
   the same clips — so adding the ingest measurement took a 3-video session from
