@@ -1,5 +1,26 @@
 # Sideline — Build Progress
 
+## Phase 3 (v2) — The Data Phase
+
+Nothing in this phase touches how the AI decides to cut, plan, or write. Every
+item changes what the AI SEES or what WE CAN MEASURE.
+
+- **3.1 Objective scorecard** ✅ built — `worker/src/scorecard.js`, a pure
+  no-I/O module that runs seven structural checks on every finished piece
+  before the coach sees it: `captions_overlap`, `piece_too_short`,
+  `segment_too_short`, `segment_too_long`, `footage_repeated`, `hook_too_long`,
+  `captions_run_past_end`. Flags are stored on `content_pieces.flags` (jsonb)
+  by compose and recomputed by revise, since a revision rewrites the cut. The
+  EDL now also carries `target_length_sec` so a revised piece stays scorable
+  against the director's original target. A missing `flags` column can never
+  cost a coach their reels — both writes retry without it and warn. Regression
+  suite at `worker/test/scorecard.test.mjs` (`npm test` in `worker/`): 17 cases
+  covering a clean piece, each check firing alone, boundary cases that must NOT
+  fire (shots meeting exactly, captions touching exactly, an 8-word hook), and
+  malformed input. `supabase/check-flags.sql` recomputes two checks
+  independently in SQL to cross-verify against real data.
+  Migration: `supabase/v9-piece-flags.sql`.
+
 ## Phase 3 — RESET to the baseline (2026-09-08)
 
 Everything below this section describes work that has been **reverted**.

@@ -20,6 +20,7 @@ import {
   ffmpegRun,
 } from "./ffmpeg.js";
 import { askClaude, imageBlock, extractJson } from "./claude.js";
+import { scorePiece } from "./scorecard.js";
 
 const MOMENT_TYPES = [
   "teaching",
@@ -193,7 +194,7 @@ function normalizePlan(raw, assets) {
       cluster_id: String(c?.cluster_id || `c${i + 1}`),
       label: String(c?.label || "clip").slice(0, 80),
       video_ids: (Array.isArray(c?.video_ids) ? c.video_ids : []).filter((v) =>
-        ids.has(v)
+        ids.has(v),
       ),
       angle_variety_score: clamp01(Number(c?.angle_variety_score)),
     }))
@@ -204,10 +205,11 @@ function normalizePlan(raw, assets) {
   let pieces = (Array.isArray(raw?.planned_pieces) ? raw.planned_pieces : [])
     .map((p, i) => ({
       piece_id: String(p?.piece_id || `p${i + 1}`),
-      kind: String(p?.kind || "single")
-        .toLowerCase()
-        .replace(/[^a-z_]/g, "")
-        .slice(0, 40) || "single",
+      kind:
+        String(p?.kind || "single")
+          .toLowerCase()
+          .replace(/[^a-z_]/g, "")
+          .slice(0, 40) || "single",
       cluster_ids_to_use: (Array.isArray(p?.cluster_ids_to_use)
         ? p.cluster_ids_to_use
         : []
@@ -297,7 +299,7 @@ export async function direct({ session }) {
     text: prompt
       ? `THE COACH'S REQUEST FOR THIS UPLOAD (TOP PRIORITY — honor it above everything): "${prompt.slice(
           0,
-          500
+          500,
         )}"`
       : "THE COACH GAVE NO REQUEST — you decide. Build a VARIED pack that serves their mission; mix the kinds, don't repeat one kind.",
   });
@@ -331,12 +333,13 @@ export async function direct({ session }) {
         .from("media_assets")
         .update({ cluster_id: c.id, cluster_label: c.label })
         .eq("id", a.id);
-      if (tagErr) console.warn(`  cluster tag failed ${a.id}: ${tagErr.message}`);
+      if (tagErr)
+        console.warn(`  cluster tag failed ${a.id}: ${tagErr.message}`);
     }
   }
 
   console.log(
-    `  directed ${plan.planned_pieces.length} piece(s) from ${assets.length} video(s)`
+    `  directed ${plan.planned_pieces.length} piece(s) from ${assets.length} video(s)`,
   );
   return "transcribe";
 }
@@ -364,7 +367,7 @@ export async function transcribe({ session }) {
               "Content-Type": "audio/wav",
             },
             body: wav,
-          }
+          },
         );
         if (!res.ok) throw new Error(`deepgram ${res.status}`);
         const json = await res.json();
@@ -395,7 +398,7 @@ export async function understand({ session }) {
 
   for (const asset of assets) {
     const transcript = await downloadJson(
-      artifactPath(asset, "transcript.json")
+      artifactPath(asset, "transcript.json"),
     ).catch(() => ({ text: "", words: [] }));
 
     const moments = await withTmp(async (dir) => {
@@ -414,7 +417,7 @@ export async function understand({ session }) {
         text: [
           `You are analyzing raw training footage for a sports coach.`,
           `Coach profile: sport=${coach.sport}; audience=${coach.audience}; mission=${coach.mission}.`,
-          session.prompt ?? session.brief
+          (session.prompt ?? session.brief)
             ? `THE COACH'S NOTE FOR THIS SESSION (top priority, honor it): "${String(session.prompt ?? session.brief).slice(0, 500)}"`
             : ``,
           `Video duration: ${asset.duration_sec ?? "unknown"}s.`,
@@ -454,7 +457,7 @@ export async function understand({ session }) {
           Number.isFinite(m.t_start) &&
           Number.isFinite(m.t_end) &&
           m.t_end > m.t_start &&
-          MOMENT_TYPES.includes(m.type)
+          MOMENT_TYPES.includes(m.type),
       )
       .map((m) => ({
         session_id: session.id,
@@ -499,7 +502,7 @@ async function ensureIgProfile(coach) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ usernames: [handle] }),
-      }
+      },
     );
     if (!res.ok) throw new Error(`apify ${res.status}`);
     const items = await res.json();
@@ -632,7 +635,7 @@ async function composePlannedPiece({
       const a = byId[m.asset_id];
       const landscape = (a?.width ?? 0) > (a?.height ?? 0);
       return `#${i} · asset=${m.asset_id} · ${m.t_start.toFixed(
-        1
+        1,
       )}s→${m.t_end.toFixed(1)}s (${(m.t_end - m.t_start).toFixed(1)}s) · ${
         landscape ? "landscape" : "vertical"
       } source · ${m.type} · ${m.reason} · said: "${(
@@ -653,7 +656,7 @@ async function composePlannedPiece({
     coach.voice_memo_transcript
       ? `VOICE SAMPLE — copy STYLE only (tone, rhythm, word length), NEVER its topic or examples: "${coach.voice_memo_transcript.slice(
           0,
-          900
+          900,
         )}"`
       : `(No voice memo — write plain, direct, no corporate tone.)`,
     coach.ig_profile
@@ -710,7 +713,7 @@ async function composePlannedPiece({
       const start = Math.max(lo, Math.min(Number(seg.in), hi - 1));
       const end = Math.min(
         hi,
-        Math.max(start + 1, Math.min(Number(seg.out), start + perSegCap))
+        Math.max(start + 1, Math.min(Number(seg.out), start + perSegCap)),
       );
       if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < 1)
         return null;
@@ -755,8 +758,8 @@ async function composePlannedPiece({
   if (total < MIN_PIECE_SEC) {
     console.log(
       `    skipped ${pp.piece_id}: only ${total.toFixed(
-        1
-      )}s of usable footage (minimum ${MIN_PIECE_SEC}s)`
+        1,
+      )}s of usable footage (minimum ${MIN_PIECE_SEC}s)`,
     );
     return false;
   }
@@ -769,11 +772,14 @@ async function composePlannedPiece({
   const folder = firstAsset.storage_path.split("/").slice(0, 2).join("/");
   const posterStorage = `${folder}/posters/${session.id}-${pp.piece_id}.jpg`;
   await withTmp(async (dir) => {
-    const local = await downloadTo(firstAsset.storage_path, join(dir, "in.mp4"));
+    const local = await downloadTo(
+      firstAsset.storage_path,
+      join(dir, "in.mp4"),
+    );
     const poster = await posterFrame(
       local,
       first.in + (first.out - first.in) / 2,
-      join(dir, "poster.jpg")
+      join(dir, "poster.jpg"),
     );
     await uploadFrom(poster, posterStorage, "image/jpeg");
   });
@@ -789,19 +795,34 @@ async function composePlannedPiece({
   if (posterErr) throw new Error(`poster asset: ${posterErr.message}`);
 
   const isMulti = segments.length > 1;
-  const { error: insErr } = await db.from("content_pieces").insert({
+  const edl = {
+    segments,
+    type: pp.kind,
+    crop: {
+      mode: isMulti ? "center" : "eased",
+      start_x_frac: 0.5,
+    },
+    captions,
+    poster_asset_id: posterAsset.id,
+    // Carried so a revision can re-score the piece against the same target the
+    // director set. Nothing in render reads it.
+    target_length_sec: target,
+  };
+  // Score the piece before it can reach the coach. Flags are a record of what
+  // the structure looks like, not a gate — nothing is blocked on them.
+  const flags = scorePiece({
+    edl,
+    hook: draft.hook,
+    targetLengthSec: target,
+  });
+  if (flags.length)
+    console.log(`    ${pp.piece_id} flags: ${flags.join(", ")}`);
+
+  const row = {
     session_id: session.id,
     format: "reel",
-    edl: {
-      segments,
-      type: pp.kind,
-      crop: {
-        mode: isMulti ? "center" : "eased",
-        start_x_frac: 0.5,
-      },
-      captions,
-      poster_asset_id: posterAsset.id,
-    },
+    edl,
+    flags,
     // Null until the render stage produces the mp4 — never the poster JPG.
     render_asset_id: null,
     piece_kind: String(pp.kind).slice(0, 40),
@@ -814,7 +835,19 @@ async function composePlannedPiece({
     suggested_slot: String(draft.suggested_slot ?? "").slice(0, 40),
     suggested_sound: String(draft.suggested_sound ?? "").slice(0, 120),
     status: "ready",
-  });
+  };
+
+  let { error: insErr } = await db.from("content_pieces").insert(row);
+  // The scorecard must never be able to cost a coach their reels. If
+  // v9-piece-flags.sql hasn't been run, the column is missing and the whole
+  // insert fails — so drop the flags and save the piece.
+  if (insErr) {
+    console.warn(
+      `  flags not saved (${insErr.message}) — run supabase/v9-piece-flags.sql`,
+    );
+    const { flags: _dropped, ...withoutFlags } = row;
+    ({ error: insErr } = await db.from("content_pieces").insert(withoutFlags));
+  }
   if (insErr) throw new Error(`insert piece: ${insErr.message}`);
   return true;
 }
@@ -835,7 +868,7 @@ function sanitizeForBurn(text) {
   return String(text)
     .replace(
       /[\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}\u{2300}-\u{23FF}\u{2500}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{200D}]/gu,
-      ""
+      "",
     )
     .replace(/\s+([,.!?;:])/g, "$1") // no space left dangling before punctuation
     .replace(/\s{2,}/g, " ")
@@ -880,7 +913,7 @@ function overlayFilter({ edl, totalDur, accentHex, dir, writeFileSync }) {
   const parts = ["format=yuv420p"];
   parts.push(
     "fade=t=in:st=0:d=0.35",
-    `fade=t=out:st=${Math.max(0, totalDur - 0.35).toFixed(2)}:d=0.35`
+    `fade=t=out:st=${Math.max(0, totalDur - 0.35).toFixed(2)}:d=0.35`,
   );
   const accent = "0x" + (accentHex || "#C8102E").replace("#", "");
   (edl.captions ?? []).forEach((c, i) => {
@@ -890,11 +923,11 @@ function overlayFilter({ edl, totalDur, accentHex, dir, writeFileSync }) {
     const common = `fontfile=${FONT}:textfile=${txt}:x=(w-text_w)/2:line_spacing=10:enable='between(t,${c.t0},${c.t1})'`;
     if (hook) {
       parts.push(
-        `drawtext=${common}:fontcolor=white:fontsize=54:box=1:boxcolor=${accent}:boxborderw=20:y=1380`
+        `drawtext=${common}:fontcolor=white:fontsize=54:box=1:boxcolor=${accent}:boxborderw=20:y=1380`,
       );
     } else {
       parts.push(
-        `drawtext=${common}:fontcolor=white:fontsize=42:borderw=6:bordercolor=black@0.55:y=1470`
+        `drawtext=${common}:fontcolor=white:fontsize=42:borderw=6:bordercolor=black@0.55:y=1470`,
       );
     }
   });
@@ -903,21 +936,32 @@ function overlayFilter({ edl, totalDur, accentHex, dir, writeFileSync }) {
 
 // Intermediate segments stay local — speed over size.
 const ENC_SEG = [
-  "-c:v", "libx264",
-  "-preset", "ultrafast",
-  "-crf", "18",
-  "-r", "30",
+  "-c:v",
+  "libx264",
+  "-preset",
+  "ultrafast",
+  "-crf",
+  "18",
+  "-r",
+  "30",
 ];
 // Final output gets uploaded — compress properly and cap the bitrate so a
 // 60s reel can never exceed the storage tier's 50MB per-file limit.
 const ENC_FINAL = [
-  "-c:v", "libx264",
-  "-preset", "veryfast",
-  "-threads", "2",
-  "-crf", "21",
-  "-maxrate", "6M",
-  "-bufsize", "12M",
-  "-r", "30",
+  "-c:v",
+  "libx264",
+  "-preset",
+  "veryfast",
+  "-threads",
+  "2",
+  "-crf",
+  "21",
+  "-maxrate",
+  "6M",
+  "-bufsize",
+  "12M",
+  "-r",
+  "30",
 ];
 
 export async function render({ session }) {
@@ -939,7 +983,7 @@ export async function render({ session }) {
     .eq("session_id", session.id)
     .eq("kind", "render");
   const assetPath = Object.fromEntries(
-    (renderAssets ?? []).map((a) => [a.id, a.storage_path])
+    (renderAssets ?? []).map((a) => [a.id, a.storage_path]),
   );
 
   for (const piece of pieces ?? []) {
@@ -962,7 +1006,7 @@ export async function render({ session }) {
         byId[seg.asset_id] &&
         Number.isFinite(seg.in) &&
         Number.isFinite(seg.out) &&
-        seg.out > seg.in
+        seg.out > seg.in,
     );
     if (!segments.length) continue;
 
@@ -974,7 +1018,7 @@ export async function render({ session }) {
         if (!local[seg.asset_id]) {
           local[seg.asset_id] = await downloadTo(
             byId[seg.asset_id].storage_path,
-            join(dir, `src-${seg.asset_id}.mp4`)
+            join(dir, `src-${seg.asset_id}.mp4`),
           );
           info[seg.asset_id] = await probe(local[seg.asset_id]);
         }
@@ -990,11 +1034,26 @@ export async function render({ session }) {
         const geo = geometryFilter(
           inf.width ?? 1920,
           inf.height ?? 1080,
-          seg.crop ?? edl.crop
+          seg.crop ?? edl.crop,
         );
-        const args = ["-y", "-ss", String(seg.in), "-t", String(dur), "-i", local[seg.asset_id]];
+        const args = [
+          "-y",
+          "-ss",
+          String(seg.in),
+          "-t",
+          String(dur),
+          "-i",
+          local[seg.asset_id],
+        ];
         if (!inf.hasAudio) {
-          args.push("-f", "lavfi", "-t", String(dur), "-i", "anullsrc=r=48000:cl=stereo");
+          args.push(
+            "-f",
+            "lavfi",
+            "-t",
+            String(dur),
+            "-i",
+            "anullsrc=r=48000:cl=stereo",
+          );
           args.push("-map", "0:v:0", "-map", "1:a:0");
         }
         args.push("-vf", `${geo},fps=30,format=yuv420p`);
@@ -1017,12 +1076,26 @@ export async function render({ session }) {
       if (segFiles.length === 1) {
         const totalDur = durs[0];
         await ffmpegRun([
-          "-y", "-i", segFiles[0],
-          "-vf", overlayFilter({ edl, totalDur, accentHex: coach.accent_hex, dir, writeFileSync }),
-          "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
-          "-c:a", "aac", "-b:a", "128k",
+          "-y",
+          "-i",
+          segFiles[0],
+          "-vf",
+          overlayFilter({
+            edl,
+            totalDur,
+            accentHex: coach.accent_hex,
+            dir,
+            writeFileSync,
+          }),
+          "-af",
+          "loudnorm=I=-16:TP=-1.5:LRA=11",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "128k",
           ...ENC_FINAL,
-          "-movflags", "+faststart",
+          "-movflags",
+          "+faststart",
           out,
         ]);
       } else {
@@ -1038,11 +1111,11 @@ export async function render({ session }) {
           // cuts) joins cleanly instead of erroring.
           const fd = Math.max(
             0.05,
-            Math.min(baseFd, durs[i - 1] / 2, durs[i] / 2)
+            Math.min(baseFd, durs[i - 1] / 2, durs[i] / 2),
           );
           const offset = Math.max(0, acc - fd).toFixed(3);
           graph.push(
-            `[${vPrev}][${i}:v]xfade=transition=${type}:duration=${fd}:offset=${offset}[v${i}]`
+            `[${vPrev}][${i}:v]xfade=transition=${type}:duration=${fd}:offset=${offset}[v${i}]`,
           );
           graph.push(`[${aPrev}][${i}:a]acrossfade=d=${fd}[a${i}]`);
           vPrev = `v${i}`;
@@ -1051,18 +1124,25 @@ export async function render({ session }) {
         }
         const totalDur = acc;
         graph.push(
-          `[${vPrev}]${overlayFilter({ edl, totalDur, accentHex: coach.accent_hex, dir, writeFileSync })}[vout]`
+          `[${vPrev}]${overlayFilter({ edl, totalDur, accentHex: coach.accent_hex, dir, writeFileSync })}[vout]`,
         );
         graph.push(`[${aPrev}]loudnorm=I=-16:TP=-1.5:LRA=11[aout]`);
         await ffmpegRun([
           "-y",
           ...segFiles.flatMap((f) => ["-i", f]),
-          "-filter_complex", graph.join(";"),
-          "-map", "[vout]",
-          "-map", "[aout]",
-          "-c:a", "aac", "-b:a", "128k",
+          "-filter_complex",
+          graph.join(";"),
+          "-map",
+          "[vout]",
+          "-map",
+          "[aout]",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "128k",
           ...ENC_FINAL,
-          "-movflags", "+faststart",
+          "-movflags",
+          "+faststart",
           out,
         ]);
       }
@@ -1097,7 +1177,9 @@ export async function render({ session }) {
         })
         .eq("id", piece.id);
       if (upErr) throw new Error(`update piece: ${upErr.message}`);
-      console.log(`  rendered piece ${piece.id} (${segments.length} segment${segments.length === 1 ? "" : "s"})`);
+      console.log(
+        `  rendered piece ${piece.id} (${segments.length} segment${segments.length === 1 ? "" : "s"})`,
+      );
     });
   }
 
@@ -1173,7 +1255,7 @@ export async function revise({ session }) {
           coach.voice_memo_transcript
             ? `Voice sample (STYLE ONLY — copy tone/rhythm, never its topic): "${coach.voice_memo_transcript.slice(
                 0,
-                700
+                700,
               )}"`
             : ``,
           ``,
@@ -1189,7 +1271,7 @@ export async function revise({ session }) {
               cta: piece.cta,
             },
             null,
-            1
+            1,
           ),
           ``,
           `THE COACH'S REVISION REQUEST — plain English, honor it exactly. It`,
@@ -1243,7 +1325,7 @@ export async function revise({ session }) {
           const start = Math.max(0, Math.min(Number(seg.in) || 0, hi - 1));
           const end = Math.min(
             hi,
-            Math.max(start + 1, Number(seg.out) || start + 1)
+            Math.max(start + 1, Number(seg.out) || start + 1),
           );
           if (!(end - start >= 1)) return null;
           return {
@@ -1269,7 +1351,7 @@ export async function revise({ session }) {
 
       if (!segments.length) {
         console.warn(
-          `revision for piece ${piece.id} produced no usable cut — skipped`
+          `revision for piece ${piece.id} produced no usable cut — skipped`,
         );
         await db
           .from("content_pieces")
@@ -1296,12 +1378,12 @@ export async function revise({ session }) {
         await withTmp(async (dir) => {
           const local = await downloadTo(
             firstAsset.storage_path,
-            join(dir, "in.mp4")
+            join(dir, "in.mp4"),
           );
           const poster = await posterFrame(
             local,
             first.in + (first.out - first.in) / 2,
-            join(dir, "poster.jpg")
+            join(dir, "poster.jpg"),
           );
           await uploadFrom(poster, posterStorage, "image/jpeg");
         });
@@ -1328,26 +1410,51 @@ export async function revise({ session }) {
           start_x_frac: Number(draft.edl?.crop?.start_x_frac ?? 0.5),
         },
         captions,
+        // Carried forward so the piece stays scorable against the director's
+        // original target across any number of revisions.
+        target_length_sec: piece.edl?.target_length_sec,
       };
 
-      const { error: upErr } = await db
+      // A revision rewrites the cut, so the piece has to be re-scored — stale
+      // flags would describe a video that no longer exists.
+      const newHook = String(draft.hook ?? piece.hook ?? "").slice(0, 200);
+      const newFlags = scorePiece({
+        edl: newEdl,
+        hook: newHook,
+        targetLengthSec: piece.edl?.target_length_sec,
+      });
+      if (newFlags.length)
+        console.log(
+          `    ${piece.id} flags after revision: ${newFlags.join(", ")}`,
+        );
+
+      const patch = {
+        edl: newEdl,
+        flags: newFlags,
+        hook: newHook,
+        caption: String(draft.caption ?? piece.caption ?? "").slice(0, 2000),
+        hashtags: String(draft.hashtags ?? piece.hashtags ?? "").slice(0, 300),
+        cta: String(draft.cta ?? piece.cta ?? "").slice(0, 300),
+        why: String(draft.why ?? "Revised per your note.").slice(0, 500),
+        status: "rendering",
+        render_asset_id: null,
+        revision_note: null,
+        revision_history: newHistory,
+      };
+
+      let { error: upErr } = await db
         .from("content_pieces")
-        .update({
-          edl: newEdl,
-          hook: String(draft.hook ?? piece.hook ?? "").slice(0, 200),
-          caption: String(draft.caption ?? piece.caption ?? "").slice(0, 2000),
-          hashtags: String(draft.hashtags ?? piece.hashtags ?? "").slice(
-            0,
-            300
-          ),
-          cta: String(draft.cta ?? piece.cta ?? "").slice(0, 300),
-          why: String(draft.why ?? "Revised per your note.").slice(0, 500),
-          status: "rendering",
-          render_asset_id: null,
-          revision_note: null,
-          revision_history: newHistory,
-        })
+        .update(patch)
         .eq("id", piece.id);
+      // Same rule as compose: a missing flags column must never cost the coach
+      // their revision.
+      if (upErr) {
+        const { flags: _dropped, ...withoutFlags } = patch;
+        ({ error: upErr } = await db
+          .from("content_pieces")
+          .update(withoutFlags)
+          .eq("id", piece.id));
+      }
       if (upErr) throw new Error(`apply revision: ${upErr.message}`);
       console.log(`  revised piece ${piece.id}`);
     } catch (e) {
@@ -1368,7 +1475,7 @@ export async function revise({ session }) {
 export async function cleanup() {
   const chunks = (arr, n) =>
     Array.from({ length: Math.ceil(arr.length / n) }, (_, i) =>
-      arr.slice(i * n, i * n + n)
+      arr.slice(i * n, i * n + n),
     );
   let removed = 0;
 
@@ -1392,7 +1499,10 @@ export async function cleanup() {
     await db
       .from("media_assets")
       .delete()
-      .in("id", batch.map((o) => o.id));
+      .in(
+        "id",
+        batch.map((o) => o.id),
+      );
     removed += batch.length;
   }
 
@@ -1422,9 +1532,7 @@ export async function cleanup() {
   // Kept 30 days so revisions (which need the source footage) work for a
   // month; after that the source is purged. The finished reels (renders +
   // posters) are separate files and are left untouched.
-  const cutoff = new Date(
-    Date.now() - 30 * 24 * 60 * 60 * 1000
-  ).toISOString();
+  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const { data: oldDone } = await db
     .from("sessions")
     .select("id")
@@ -1448,4 +1556,13 @@ export async function cleanup() {
   return null;
 }
 
-export const STAGES = { ingest, direct, transcribe, understand, compose, render, revise, cleanup };
+export const STAGES = {
+  ingest,
+  direct,
+  transcribe,
+  understand,
+  compose,
+  render,
+  revise,
+  cleanup,
+};
