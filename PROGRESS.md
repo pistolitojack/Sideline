@@ -68,6 +68,18 @@ item changes what the AI SEES or what WE CAN MEASURE.
   resets on open so a note can never ride along with a later decision. A
   missing column can't lose the decision — the update retries without it.
   Migration: `supabase/v9-skip-detail.sql`.
+- **3.5 Review behaviour tracking** ✅ built — silent, never shown to the
+  coach. `content_pieces` records `reviewed_at`, `review_dwell_ms` (card into
+  view → decision), `detail_opened`, and `revision_count`. SwipeCard is keyed
+  by piece id, so its mount IS the card appearing; the clock is stamped in an
+  effect (reading it during render is impure). `onDecision` was refactored from
+  a growing tail of positional arguments to a single `ReviewDecision` object,
+  which is what made this additive rather than a fourth parameter. Revision
+  counting goes through a `bump_revision_count` SQL function so two revisions
+  in quick succession can't clobber each other. The admin piece view now shows
+  "4.2s to decide · opened detail · 1 revision". A missing column still can't
+  lose the decision — the update falls back to status + reason only.
+  Migration: `supabase/v9-review-behavior.sql`.
 - **Baseline captured** — `BASELINE-PHASE-3-DATA.md`: the plan, all three
   pieces with shot lengths and flags, Jack's verbatim read, and the flag totals
   every later item is measured against.

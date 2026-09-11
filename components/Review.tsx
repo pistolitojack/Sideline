@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { BASE, TYPE_COLORS } from "@/lib/design";
 import type { Piece } from "@/lib/types";
 import DayStrip from "./DayStrip";
@@ -10,6 +10,16 @@ import Footage from "./Footage";
 // at a different part of the pipeline, so a pattern in these is diagnostic:
 // "Weak hook" is the writer, "Boring cut" is the editor, "Off-brand" is the
 // director's read of the coach.
+// Phase 3.5 — everything we know about HOW a decision was made. The reel a
+// coach approves in two seconds without opening the detail is a different
+// signal from one they study for thirty, even though both land as "approved".
+export type ReviewDecision = {
+  reason?: string | null;
+  reasonText?: string | null;
+  dwellMs?: number | null;
+  detailOpened?: boolean;
+};
+
 const SKIP_REASONS = [
   "Weak hook",
   "Wrong energy",
@@ -29,8 +39,7 @@ export default function Review({
   onDecision: (
     id: number | string,
     status: "approved" | "skipped",
-    reason?: string | null,
-    reasonText?: string | null
+    detail?: ReviewDecision
   ) => void;
   goToday: () => void;
   accent: string;
@@ -74,15 +83,15 @@ export default function Review({
   if (!piece)
     return <DoneScreen pieces={pieces} goToday={goToday} accent={accent} />;
 
-  const approve = (p: Piece) => {
+  const approve = (p: Piece, d: ReviewDecision) => {
     setHint(false);
     setToast(`Approved · ${p.slot}`);
     setTimeout(() => setToast(null), 1600);
-    setTimeout(() => onDecision(p.id, "approved"), 380);
+    setTimeout(() => onDecision(p.id, "approved", d), 380);
   };
-  const skip = (p: Piece, reason: string | null, note: string | null) => {
+  const skip = (p: Piece, d: ReviewDecision) => {
     setHint(false);
-    setTimeout(() => onDecision(p.id, "skipped", reason, note), 340);
+    setTimeout(() => onDecision(p.id, "skipped", d), 340);
   };
 
   return (
@@ -102,8 +111,8 @@ export default function Review({
         accent={accent}
         showHint={hint && doneCount === 0}
         onInteract={() => setHint(false)}
-        onApprove={() => approve(piece)}
-        onSkip={(reason, note) => skip(piece, reason, note)}
+        onApprove={(d) => approve(piece, d)}
+        onSkip={(d) => skip(piece, d)}
         onRevise={(note) => {
           setToast("Your editor is on it — check back in a few minutes");
           setTimeout(() => setToast(null), 2600);
@@ -148,8 +157,8 @@ function SwipeCard({
   accent: string;
   showHint: boolean;
   onInteract: () => void;
-  onApprove: () => void;
-  onSkip: (reason: string | null, note: string | null) => void;
+  onApprove: (d: ReviewDecision) => void;
+  onSkip: (d: ReviewDecision) => void;
   onRevise: (note: string) => void;
 }) {
   const [dx, setDx] = useState(0);
@@ -159,9 +168,28 @@ function SwipeCard({
   // coach's own words, which is the part that actually teaches.
   const [skipReason, setSkipReason] = useState<string | null>(null);
   const [skipNote, setSkipNote] = useState("");
+  // Phase 3.5 — how this decision got made. SwipeCard is keyed by piece id, so
+  // it remounts for each card: mounting IS the card coming into view. Stamped
+  // in an effect rather than during render, because reading the clock while
+  // rendering is impure.
+  const shownAt = useRef(0);
+  const openedDetail = useRef(false);
   const [fly, setFly] = useState<"left" | "right" | null>(null);
   const [sheet, setSheet] = useState(false);
   const [detail, setDetail] = useState(false);
+
+  useEffect(() => {
+    shownAt.current = Date.now();
+    openedDetail.current = false;
+  }, []);
+
+  // Snapshot of the behaviour, read at the moment of decision.
+  const behavior = () => ({
+    dwellMs: shownAt.current
+      ? Math.max(0, Date.now() - shownAt.current)
+      : null,
+    detailOpened: openedDetail.current,
+  });
   const [note, setNote] = useState("");
   const startX = useRef<number | null>(null);
   const dxRef = useRef(0);
@@ -174,7 +202,7 @@ function SwipeCard({
   const approve = () => {
     onInteract();
     setFly("right");
-    onApprove();
+    onApprove(behavior());
   };
   const askSkip = () => {
     onInteract();
@@ -188,7 +216,11 @@ function SwipeCard({
   const skipWith = (reason: string | null, note: string | null) => {
     setSheet(false);
     setFly("left");
-    onSkip(reason, note?.trim() ? note.trim().slice(0, 300) : null);
+    onSkip({
+      reason,
+      reasonText: note?.trim() ? note.trim().slice(0, 300) : null,
+      ...behavior(),
+    });
   };
 
   const down = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -213,7 +245,10 @@ function SwipeCard({
     else if (d < -90) askSkip();
     else {
       setDrag(0);
-      if (!moved.current) setDetail(true);
+      if (!moved.current) {
+        openedDetail.current = true;
+        setDetail(true);
+      }
     }
   };
 

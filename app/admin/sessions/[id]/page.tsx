@@ -161,6 +161,18 @@ export default async function AdminSessionDetail({
                   {segments.length} {segments.length === 1 ? "shot" : "shots"} ·{" "}
                   {total.toFixed(1)}s
                 </span>
+                {p.reviewed_at && (
+                  <span
+                    className="rounded-full border border-neutral-200 px-2 py-0.5 text-neutral-600"
+                    title="How the coach reviewed it (Phase 3.5 — never shown to them)"
+                  >
+                    {p.review_dwell_ms != null
+                      ? `${(p.review_dwell_ms / 1000).toFixed(1)}s to decide`
+                      : "reviewed"}
+                    {p.detail_opened ? " · opened detail" : ""}
+                    {p.revision_count ? ` · ${p.revision_count} revision${p.revision_count === 1 ? "" : "s"}` : ""}
+                  </span>
+                )}
                 {flags.map((f) => (
                   <span
                     key={f}

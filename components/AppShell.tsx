@@ -5,7 +5,7 @@ import { ACCENTS, BASE } from "@/lib/design";
 import type { Coach, Piece } from "@/lib/types";
 import { createClient, hasSupabaseEnv } from "@/lib/supabase/client";
 import Business from "./Business";
-import Review from "./Review";
+import Review, { type ReviewDecision } from "./Review";
 import TabBar, { type Tab } from "./TabBar";
 import Today from "./Today";
 
@@ -59,9 +59,9 @@ export default function AppShell({
   const decide = (
     id: number | string,
     status: "approved" | "skipped",
-    reason?: string | null,
-    reasonText?: string | null
+    detail?: ReviewDecision
   ) => {
+    const reason = detail?.reason ?? null;
     setPieces((ps) =>
       ps.map((p) => (p.id === id ? { ...p, status, skipReason: reason } : p))
     );
@@ -71,17 +71,21 @@ export default function AppShell({
       db.from("content_pieces")
         .update({
           status,
-          skip_reason: reason ?? null,
-          skip_reason_text: reasonText ?? null,
+          skip_reason: reason,
+          skip_reason_text: detail?.reasonText ?? null,
+          // Phase 3.5 — silent behaviour signal. Never shown to the coach.
+          reviewed_at: new Date().toISOString(),
+          review_dwell_ms: detail?.dwellMs ?? null,
+          detail_opened: detail?.detailOpened ?? false,
         })
         .eq("id", id)
         .then(({ error }) => {
-          // If v9-skip-detail.sql hasn't been run the column is missing and the
-          // whole update fails — which would lose the decision itself. Save
-          // what we can rather than drop the coach's choice on the floor.
+          // If a migration hasn't been run the column is missing and the whole
+          // update fails — which would lose the decision itself. The decision
+          // matters more than the telemetry, so fall back to just the decision.
           if (error) {
             db.from("content_pieces")
-              .update({ status, skip_reason: reason ?? null })
+              .update({ status, skip_reason: reason })
               .eq("id", id)
               .then(undefined, () => {});
           }
@@ -111,6 +115,14 @@ export default function AppShell({
       hasSupabaseEnv()
     ) {
       const c = createClient();
+      // Phase 3.5 — how many times this piece had to be sent back is one of
+      // the sharpest quality signals we have: the coach kept the idea but the
+      // execution missed. Counted in the database so concurrent updates can't
+      // clobber each other.
+      c.rpc("bump_revision_count", { piece_id: piece.id }).then(
+        undefined,
+        () => {}
+      );
       c.from("content_pieces")
         .update({ revision_note: note.slice(0, 600), status: "rendering" })
         .eq("id", piece.id)
