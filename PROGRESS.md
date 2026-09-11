@@ -80,6 +80,21 @@ item changes what the AI SEES or what WE CAN MEASURE.
   "4.2s to decide · opened detail · 1 revision". A missing column still can't
   lose the decision — the update falls back to status + reason only.
   Migration: `supabase/v9-review-behavior.sql`.
+- **3.6 Coach memory injection** ✅ built — `worker/src/memory.js` loads what
+  the coach has actually done and hands it to the director as a
+  "WHAT THIS COACH RESPONDS TO" section: approval rate by piece kind, the hooks
+  they kept (with why each was made), the ones they rejected with reason and
+  their own words, the changes they asked for, which chips they reach for and
+  how they send them, and how long they look before deciding. Framed as
+  observation — "decide for yourself what it means" — and explicitly ranked
+  below this upload's request. Loading and formatting are separate so
+  `formatCoachMemory` is pure and testable; 21 tests cover the preference
+  signal, the wording guarantees, singular/plural, and malformed input. A coach
+  with no decisions gets NO section rather than an empty scaffold, and a failed
+  history query degrades to no memory rather than no reels. Founder ratings are
+  deliberately excluded, per the plan. No migration needed.
+  **Decision history was wiped first** (`supabase/reset-decision-history.sql`)
+  — days of button-testing would otherwise have been fed to the AI as taste.
 - **Baseline captured** — `BASELINE-PHASE-3-DATA.md`: the plan, all three
   pieces with shot lengths and flags, Jack's verbatim read, and the flag totals
   every later item is measured against.

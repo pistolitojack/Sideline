@@ -21,6 +21,7 @@ import {
 } from "./ffmpeg.js";
 import { askClaude, imageBlock, extractJson } from "./claude.js";
 import { scorePiece } from "./scorecard.js";
+import { coachMemory } from "./memory.js";
 
 const MOMENT_TYPES = [
   "teaching",
@@ -293,6 +294,16 @@ export async function direct({ session }) {
         : "- Instagram brand: not scanned",
     ].join("\n"),
   });
+
+  // Phase 3.6 — what this coach has actually responded to. Placed AFTER their
+  // profile and BEFORE this upload's request, so history informs the plan but
+  // never outranks what they asked for today. Empty string for a coach with no
+  // history, which drops the section entirely rather than showing a blank one.
+  const memory = await coachMemory(db, coach.id);
+  if (memory) {
+    console.log(`  coach memory: ${memory.split("\n").length} lines`);
+    content.push({ type: "text", text: memory });
+  }
 
   content.push({
     type: "text",
