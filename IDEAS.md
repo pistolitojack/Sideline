@@ -48,3 +48,17 @@ Good ideas that are NOT in SPEC.md for V1. Logged here instead of built.
   judgment change after it:** unlike everything that went wrong in September, we
   could actually prove it worked — count `hook_too_long` before and after. This
   is the exact class of change the scorecard was built to make safe.
+
+- **"Hype" is a moment type but not a piece kind (found 2026-09-11).** The
+  director may choose from single, montage, teaching, transformation,
+  testimonial, pov, story, funny_moment — no hype — while `MOMENT_TYPES`
+  includes hype. So a "Hype reel" chip lands as `kind: montage`, and the
+  request survives in the structural recipe and the copy rather than in a
+  distinct structure. Jack noticed this from the output before we found it in
+  the code: "the chip changes the context of what it's saying inside the reel
+  more than how it's cutting."
+  Not necessarily wrong — a hype reel arguably IS a montage, and montage
+  already routes to the fast-cut rules. But the two vocabularies disagreeing is
+  a smell, and whether "hype" deserves its own pacing identity is a judgment
+  question. Off-limits this phase; revisit with data on whether hype-chip
+  sessions actually produce shorter shots than teaching-chip ones.
