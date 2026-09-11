@@ -27,6 +27,21 @@ item changes what the AI SEES or what WE CAN MEASURE.
   both multi-shot pieces, almost certainly the same defect he described as "it
   accidentally cut twice in the span of one second". Fixed one inaccuracy found
   while reading the results: a spaced em dash counted as a word. 19 tests pass.
+- **3.2 Admin session view + founder ratings** ✅ built — `/admin/sessions`
+  lists every session across every coach (status, piece count, flag count,
+  rating progress, prompt); `/admin/sessions/[id]` shows the coach profile, the
+  prompt, the director's plan JSON, and every piece with its poster, playable
+  render, shot lengths, caption beats, copy and scorecard flags. Each piece
+  carries a rating widget: four 1-5 scales (hook, pacing, copy, would-post)
+  plus an optional note, written to `content_pieces`. Ratings are internal —
+  never shown to the coach, and deliberately NOT fed to the AI (item 6 injects
+  coach history, not these). *Deviation:* the plan specified an `ADMIN_EMAIL`
+  env var, but an env var cannot gate the database — RLS is what actually stops
+  one coach reading another's footage. Admin identity lives in a new `admins`
+  table instead, so there is ONE setting rather than two that can disagree, no
+  Vercel env var to configure, and no founder email committed to the repo.
+  Migration: `supabase/v9-founder-ratings.sql` (rating columns + `admins` +
+  `is_admin()` + additive admin read policies + an admin update policy).
 - **Baseline captured** — `BASELINE-PHASE-3-DATA.md`: the plan, all three
   pieces with shot lengths and flags, Jack's verbatim read, and the flag totals
   every later item is measured against.
