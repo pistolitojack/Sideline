@@ -10,6 +10,7 @@ import { useRouter } from "next/navigation";
 import { BASE } from "@/lib/design";
 import { createClient } from "@/lib/supabase/client";
 import { prettySize, probeVideo, uploadToStorage } from "@/lib/upload";
+import { PROMPT_CHIPS, classifyPrompt } from "@/lib/promptChips";
 
 // Phase 1.1 — upload limits. Kept in sync with the database backstop in
 // supabase/v5-upload-limits.sql (the 3-per-24h cap is enforced there too).
@@ -31,12 +32,22 @@ export default function UploadPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [items, setItems] = useState<Item[]>([]);
   const [prompt, setPrompt] = useState("");
+  const [chipId, setChipId] = useState<string | null>(null);
+  // When this screen appeared, so we can record how long the coach spent
+  // deciding what to ask for. A ref, not state: it must never trigger a
+  // re-render. Stamped in an effect rather than during render, because
+  // reading the clock while rendering is impure.
+  const mountedAt = useRef<number>(0);
   const [phase, setPhase] = useState<"pick" | "uploading" | "queued" | "failed">(
     "pick"
   );
   const [failMessage, setFailMessage] = useState<string | null>(null);
   const [remaining, setRemaining] = useState<number | null>(null); // sessions left in 24h; null = still loading
   const [pickNote, setPickNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    mountedAt.current = Date.now();
+  }, []);
 
   // Load how many sessions this coach has started in the last 24h so we can
   // show remaining quota and block once they're at the limit. Because this is
@@ -139,12 +150,34 @@ export default function UploadPage() {
         coach_id: coach.id,
         status: "uploading",
       };
-      if (prompt.trim()) sessionRow.prompt = prompt.trim().slice(0, 500);
-      const { data: sess, error: sessErr } = await supabase
+      const finalPrompt = prompt.trim().slice(0, 500);
+      if (finalPrompt) sessionRow.prompt = finalPrompt;
+
+      // Phase 3.3 signal: what the coach reached for, and how long they spent
+      // deciding. Kept separate from `sessionRow` so the upload can still go
+      // through if v9-prompt-signal.sql hasn't been run yet.
+      const signal = {
+        prompt_chip: chipId,
+        prompt_source: classifyPrompt(finalPrompt, chipId),
+        prompt_length: finalPrompt.length,
+        prompt_dwell_ms: mountedAt.current
+          ? Math.max(0, Date.now() - mountedAt.current)
+          : null,
+      };
+
+      let { data: sess, error: sessErr } = await supabase
         .from("sessions")
-        .insert(sessionRow)
+        .insert({ ...sessionRow, ...signal })
         .select("id")
         .single();
+      // A missing signal column must never cost a coach their upload.
+      if (sessErr && !sessErr.message?.includes("session_rate_limit")) {
+        ({ data: sess, error: sessErr } = await supabase
+          .from("sessions")
+          .insert(sessionRow)
+          .select("id")
+          .single());
+      }
       if (sessErr || !sess) {
         // The database backstop rejected it — they hit the daily cap between
         // page load and now (e.g. a second tab). Show the friendly message.
@@ -476,12 +509,64 @@ export default function UploadPage() {
             </p>
           )}
 
+          {/* Phase 3.3 — starting points. Tapping one fills the box with text
+              the coach can send, edit, or replace. Nothing here is required,
+              and sending an empty box stays a first-class choice. */}
+          <div
+            style={{
+              display: "flex",
+              gap: 8,
+              marginTop: 12,
+              overflowX: "auto",
+              paddingBottom: 2,
+              WebkitOverflowScrolling: "touch",
+              scrollbarWidth: "none",
+            }}
+          >
+            {PROMPT_CHIPS.map((chip) => {
+              const active = chipId === chip.id;
+              return (
+                <button
+                  key={chip.id}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => {
+                    // Tapping the active chip clears it and empties the box;
+                    // tapping a different one replaces whatever is there.
+                    if (active) {
+                      setChipId(null);
+                      setPrompt("");
+                    } else {
+                      setChipId(chip.id);
+                      setPrompt(chip.prefill);
+                    }
+                  }}
+                  style={{
+                    flex: "0 0 auto",
+                    fontSize: 12.5,
+                    fontWeight: 600,
+                    color: active ? BASE.card : BASE.ink,
+                    background: active ? BASE.ink : BASE.card,
+                    border: `1px solid ${active ? BASE.ink : BASE.faint}`,
+                    borderRadius: 999,
+                    padding: "8px 14px",
+                    whiteSpace: "nowrap",
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  {chip.label}
+                </button>
+              );
+            })}
+          </div>
+
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value.slice(0, 500))}
             rows={3}
             placeholder={
-              "Optional \u2014 tell your employee what you want. Example: \u201cmake a hype reel from today\u2019s sled work\u201d or \u201cteaching breakdown of Marcus\u2019s first-step drill\u201d or leave blank and let me decide."
+              "Optional \u2014 tell your employee what to focus on, what to try, or what you want to feel different. The more specific, the better."
             }
             style={{
               fontSize: 13.5,
@@ -492,7 +577,7 @@ export default function UploadPage() {
               borderRadius: 16,
               padding: "12px 16px",
               width: "100%",
-              marginTop: 10,
+              marginTop: 8,
               outline: "none",
               resize: "none",
               fontFamily: "inherit",

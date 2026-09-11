@@ -42,6 +42,20 @@ item changes what the AI SEES or what WE CAN MEASURE.
   Vercel env var to configure, and no founder email committed to the repo.
   Migration: `supabase/v9-founder-ratings.sql` (rating columns + `admins` +
   `is_admin()` + additive admin read policies + an admin update policy).
+- **3.3 Prompt chips at upload** ✅ built — five tappable starting points above
+  the request box (Hype reel, Teaching breakdown, Motivational story,
+  Behind-the-scenes, Client win), horizontally scrollable, one active at a
+  time. Tapping fills the box with editable text; tapping the active chip again
+  clears it. Nothing is required — an empty send is still first-class, and the
+  director reads the same plain text field it always has. New placeholder per
+  the plan. `sessions` now records `prompt_chip`, `prompt_source`,
+  `prompt_length` and `prompt_dwell_ms` (screen-mount to send). Classification
+  lives in `lib/promptChips.ts` as a pure function: `chip_unchanged` on an
+  exact match, then word-survival against the prefill (≥50% = `chip_edited`,
+  below = `chip_replaced`), `freeform` with no chip, `empty` for a blank box.
+  A missing signal column can never cost a coach their upload — the insert
+  retries without them. 20 tests in `test/promptChips.test.mjs` (`npm test`).
+  Migration: `supabase/v9-prompt-signal.sql`.
 - **Baseline captured** — `BASELINE-PHASE-3-DATA.md`: the plan, all three
   pieces with shot lengths and flags, Jack's verbatim read, and the flag totals
   every later item is measured against.
