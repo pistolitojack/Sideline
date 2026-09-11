@@ -39,14 +39,21 @@ drop policy if exists "see own admin row" on admins;
 create policy "see own admin row" on admins
   for select using (lower(email) = lower(auth.jwt() ->> 'email'));
 
--- security definer: the policies below need to read `admins` even though RLS
--- would otherwise hide most of it.
+-- SECURITY DEFINER so this answers correctly regardless of RLS. Resolves the caller's email TWO ways: the JWT's email claim, and — if that
+-- claim is absent — a lookup in auth.users by user id. Depending on the claim
+-- alone locked the founder out of their own tool once already.
 create or replace function is_admin() returns boolean
-  language sql stable security definer set search_path = public as $$
+  language sql stable security definer set search_path = public, auth as $$
   select exists (
-    select 1 from admins where lower(email) = lower(auth.jwt() ->> 'email')
+    select 1 from public.admins a
+    where lower(a.email) = lower(coalesce(
+      nullif(auth.jwt() ->> 'email', ''),
+      (select u.email from auth.users u where u.id = auth.uid())
+    ))
   );
 $$;
+
+grant execute on function is_admin() to authenticated, anon;
 
 -- ——— 3. admin read access across every coach ———
 -- These are ADDITIVE. Coaches keep their existing "own rows only" policies;
@@ -82,5 +89,9 @@ select 'founder ratings ready — now run the insert below with YOUR email' as r
 --   on conflict (email) do nothing;
 --
 -- Confirm it took:
---   select is_admin();     -- should return true while logged in as you
+--   select * from admins;
+--
+-- NOTE: `select is_admin()` returns FALSE in the SQL Editor even when set up
+-- correctly — the editor has no logged-in user, so there is no email to match.
+-- The real test is opening /admin/sessions in the browser.
 -- ═══════════════════════════════════════════════════════════════

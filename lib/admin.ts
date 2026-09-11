@@ -3,23 +3,23 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 // Gate for the internal admin views.
 //
-// The real enforcement is row-level security in the database — `is_admin()`
-// plus the admin read policies from supabase/v9-founder-ratings.sql. Without a
-// row in `admins`, these queries return nothing no matter what the UI does.
-// This check exists so a non-admin gets redirected instead of staring at an
-// empty page.
+// Asks the database a single question — is_admin() — rather than reading the
+// `admins` table from the app. That matters: is_admin() is SECURITY DEFINER,
+// so it answers correctly regardless of row-level security, and it resolves the
+// caller's email two ways (the JWT claim, falling back to auth.users by user
+// id) so a token missing the email claim can't lock the founder out of their
+// own tool.
+//
+// The real enforcement is still RLS — without a row in `admins`, every admin
+// query returns nothing no matter what the UI decides. This check exists so a
+// non-admin is redirected instead of staring at an empty page.
 export async function requireAdmin(supabase: SupabaseClient) {
   const {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const { data } = await supabase
-    .from("admins")
-    .select("email")
-    .ilike("email", user.email ?? "")
-    .maybeSingle();
-
-  if (!data) redirect("/");
+  const { data: ok } = await supabase.rpc("is_admin");
+  if (!ok) redirect("/");
   return user;
 }
