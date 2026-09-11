@@ -70,5 +70,28 @@ for (const bad of [{}, { pieces: null, sessions: null }, { pieces: [{}], session
   catch (e) { check(`survives ${JSON.stringify(bad)}`, false, e.message); }
 }
 
+console.log("\n--- reflections (Phase 3.7) ---");
+const withRef = formatCoachMemory({
+  sessions: [{ id: "s1" }],
+  pieces: [{ status: "approved", piece_kind: "teaching", hook: "Kept this" }],
+  reflections: [
+    { reflection: "They keep teaching pieces that name a specific technique detail." },
+    { reflection: "Hype clips get skipped unless the hook promises a payoff." },
+  ],
+});
+check("shows the learned-so-far block", withRef.includes("WHAT YOU'VE LEARNED ABOUT THIS COACH SO FAR"));
+check("newest reflection first", withRef.indexOf("specific technique detail") < withRef.indexOf("promises a payoff"));
+check("conclusions come BEFORE the evidence", withRef.indexOf("LEARNED ABOUT THIS COACH") < withRef.indexOf("PIECES THEY KEPT"));
+
+const refOnly = formatCoachMemory({
+  sessions: [{ id: "s1" }],
+  pieces: [{ status: "ready", hook: "undecided" }],
+  reflections: [{ reflection: "Too early to tell what they prefer." }],
+});
+check("reflections alone can carry the section", refOnly.includes("Too early to tell"));
+check("no empty stats block when nothing is decided", !refOnly.includes("By kind:"), refOnly);
+check("no reflections + no decisions still means silence",
+  formatCoachMemory({ sessions: [{}], pieces: [], reflections: [] }) === "");
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

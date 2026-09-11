@@ -95,6 +95,24 @@ item changes what the AI SEES or what WE CAN MEASURE.
   deliberately excluded, per the plan. No migration needed.
   **Decision history was wiped first** (`supabase/reset-decision-history.sql`)
   — days of button-testing would otherwise have been fed to the AI as taste.
+- **3.6b Revision notes survive a failed re-cut** — the app now writes the
+  coach's request to `revision_history` the moment they send it, instead of
+  waiting for the worker to finish. A revision killed mid-flight used to erase
+  the single most useful signal in the system. The worker de-duplicates when it
+  completes, so a request never appears twice.
+- **3.7 Self-reflection after each session** ✅ built — a new `reflect` stage
+  runs once a session is fully reviewed (the app queues the job when the LAST
+  piece gets a decision). It reads what was made, what was kept, what was
+  rejected and why — including the coach's own words and any revision requests
+  — and writes 2-3 first-person sentences synthesising their taste. Stored in
+  `coach_reflections` (one per session, enforced by a unique index). Memory
+  then loads the last 5 and puts them at the TOP of the director's section, as
+  "WHAT YOU'VE LEARNED ABOUT THIS COACH SO FAR" — conclusions first, evidence
+  below. Reflections can carry the section alone when raw history is thin. The
+  prompt explicitly permits "one session isn't enough to conclude anything"
+  rather than forcing a pattern. A failed reflection never fails the job; the
+  coach already has their reels. 27 memory tests pass.
+  Migration: `supabase/v9-reflections.sql`.
 - **Baseline captured** — `BASELINE-PHASE-3-DATA.md`: the plan, all three
   pieces with shot lengths and flags, Jack's verbatim read, and the flag totals
   every later item is measured against.

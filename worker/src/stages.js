@@ -1355,10 +1355,14 @@ export async function revise({ session }) {
           return true;
         });
 
-      const newHistory = [
-        ...history,
-        { note, at: new Date().toISOString() },
-      ].slice(-12);
+      // The app now logs the ask the moment the coach makes it, so this note
+      // is usually already the last entry. Only append when it isn't —
+      // otherwise every revision would appear twice in the coach's memory and
+      // read as though they asked for the same change repeatedly.
+      const alreadyLogged = history[history.length - 1]?.note === note;
+      const newHistory = alreadyLogged
+        ? history
+        : [...history, { note, at: new Date().toISOString() }].slice(-12);
 
       if (!segments.length) {
         console.warn(
@@ -1567,6 +1571,119 @@ export async function cleanup() {
   return null;
 }
 
+/* ——— Stage: REFLECT — after a session is fully reviewed, write down what we
+   learned about this coach. Item 6 hands the director a list of what happened;
+   this hands it a conclusion. Runs on its own job, triggered by the app when
+   the last piece in a session gets a decision. ——— */
+export async function reflect({ session }) {
+  const coach = await loadCoach(session);
+
+  // One reflection per session. A re-run must not stack duplicates.
+  const { data: already } = await db
+    .from("coach_reflections")
+    .select("id")
+    .eq("session_id", session.id)
+    .maybeSingle();
+  if (already) {
+    console.log("  already reflected on this session");
+    return null;
+  }
+
+  const { data: pieces } = await db
+    .from("content_pieces")
+    .select(
+      "hook, caption, piece_kind, director_intent, status, skip_reason, skip_reason_text, revision_history, review_dwell_ms, detail_opened",
+    )
+    .eq("session_id", session.id);
+
+  const decided = (pieces ?? []).filter((p) =>
+    ["approved", "downloaded", "skipped"].includes(p.status),
+  );
+  // Nothing to learn from a session the coach never judged.
+  if (!decided.length) {
+    console.log("  nothing decided in this session — no reflection");
+    return null;
+  }
+
+  const describe = (p) => {
+    const kept = p.status !== "skipped";
+    const bits = [
+      `- [${p.piece_kind || "?"}] "${String(p.hook ?? "").slice(0, 100)}"`,
+      kept ? "KEPT" : "REJECTED",
+    ];
+    if (p.director_intent)
+      bits.push(`made because: ${String(p.director_intent).slice(0, 120)}`);
+    if (p.skip_reason) bits.push(`reason: ${p.skip_reason}`);
+    if (p.skip_reason_text)
+      bits.push(`they said: "${String(p.skip_reason_text).slice(0, 160)}"`);
+    const revs = (Array.isArray(p.revision_history) ? p.revision_history : [])
+      .map((r) => r?.note)
+      .filter(Boolean);
+    if (revs.length)
+      bits.push(
+        `they asked for changes: ${revs
+          .map((n) => `"${String(n).slice(0, 160)}"`)
+          .join(", ")}`,
+      );
+    if (Number.isFinite(Number(p.review_dwell_ms)))
+      bits.push(`decided in ${(Number(p.review_dwell_ms) / 1000).toFixed(1)}s`);
+    return bits.join(" · ");
+  };
+
+  const reply = await askClaude({
+    system:
+      "You are Sideline's learning brain. You synthesize a coach's taste from " +
+      "what they kept and rejected. You reply with exactly one JSON object.",
+    content: [
+      {
+        type: "text",
+        text: [
+          `Coach: ${coach.name}; sport=${coach.sport}; audience=${coach.audience}; mission=${coach.mission}.`,
+          session.prompt
+            ? `What they asked for this session: "${String(session.prompt).slice(0, 300)}"`
+            : "They gave no request this session — the AI chose what to make.",
+          "",
+          "WHAT YOU MADE, AND WHAT THEY DID WITH IT:",
+          ...decided.map(describe),
+          "",
+          "Write a 2-3 sentence learning note, in first person, capturing what",
+          "you learned about THIS coach's taste. It will guide future sessions",
+          "for them, so make it something you could act on.",
+          "Do NOT restate the raw data — synthesize a preference.",
+          'Good example: "They approve teaching pieces about technique details',
+          'but skip pure hype clips — the hook has to promise a specific',
+          'learning payoff."',
+          "If one session genuinely is not enough to conclude anything, say so",
+          "plainly rather than inventing a pattern.",
+          "",
+          'Return ONLY: {"reflection": "..."}',
+        ].join("\n"),
+      },
+    ],
+    maxTokens: 500,
+    label: "reflect",
+  });
+
+  const text = String(extractJson(reply)?.reflection ?? "").trim();
+  if (!text) {
+    console.warn("  reflection came back empty — nothing saved");
+    return null;
+  }
+
+  const { error } = await db.from("coach_reflections").insert({
+    coach_id: coach.id,
+    session_id: session.id,
+    reflection: text.slice(0, 1000),
+  });
+  if (error) {
+    // Never fail a job over a learning note. The coach already has their reels.
+    console.warn(`  reflection not saved (${error.message}) — run supabase/v9-reflections.sql`);
+    return null;
+  }
+  console.log(`  learned: ${text.slice(0, 160)}`);
+  return null;
+}
+
 export const STAGES = {
   ingest,
   direct,
@@ -1575,5 +1692,6 @@ export const STAGES = {
   compose,
   render,
   revise,
+  reflect,
   cleanup,
 };

@@ -90,6 +90,24 @@ export default function AppShell({
               .then(undefined, () => {});
           }
         }, () => {});
+
+      // Phase 3.7 — when the LAST piece in a session gets a decision, the
+      // session is fully reviewed and there is something to learn from. Queue
+      // the reflection. Computed from the list we just updated rather than a
+      // fresh query, so it reflects this decision.
+      const piece = pieces.find((p) => p.id === id);
+      const sessionId = piece?.sessionId;
+      if (sessionId) {
+        const settled = (p: Piece) =>
+          p.id === id ||
+          ["approved", "downloaded", "skipped"].includes(p.status);
+        const siblings = pieces.filter((p) => p.sessionId === sessionId);
+        if (siblings.length && siblings.every(settled)) {
+          db.from("jobs")
+            .insert({ session_id: sessionId, stage: "reflect", status: "pending" })
+            .then(undefined, () => {});
+        }
+      }
     }
   };
 
@@ -123,8 +141,22 @@ export default function AppShell({
         undefined,
         () => {}
       );
+      // Record the ASK the moment it is made, not when the worker finishes.
+      // What the coach asked for is true whether or not the re-cut succeeds —
+      // and a revision killed mid-flight used to erase the single most useful
+      // signal in the system. The worker appends the same note again if it
+      // completes, so the history de-duplicates on note+minute below.
+      const askedAt = new Date().toISOString();
+      const priorHistory = Array.isArray(piece.revisions) ? piece.revisions : [];
       c.from("content_pieces")
-        .update({ revision_note: note.slice(0, 600), status: "rendering" })
+        .update({
+          revision_note: note.slice(0, 600),
+          status: "rendering",
+          revision_history: [
+            ...priorHistory,
+            { note: note.slice(0, 600), at: askedAt },
+          ].slice(-12),
+        })
         .eq("id", piece.id)
         .then(() =>
           c

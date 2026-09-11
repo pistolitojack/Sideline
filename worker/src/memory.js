@@ -39,11 +39,21 @@ export async function loadCoachHistory(db, coachId) {
     .order("created_at", { ascending: false })
     .limit(200);
 
+  // Phase 3.7 — what the AI has already concluded about this coach. Loaded
+  // separately because it survives even when raw history is thin.
+  const { data: reflections } = await db
+    .from("coach_reflections")
+    .select("reflection, created_at")
+    .eq("coach_id", coachId)
+    .order("created_at", { ascending: false })
+    .limit(5);
+
   return {
     // Chip stats come from the most recent 20 sessions only — how a coach asks
     // for work drifts, and old habits shouldn't outvote current ones.
     sessions: (sessions ?? []).slice(0, 20),
     pieces: pieces ?? [],
+    reflections: reflections ?? [],
   };
 }
 
@@ -61,8 +71,13 @@ export function formatCoachMemory(history) {
   const skipped = pieces.filter((p) => p.status === "skipped");
   const decided = approved.length + skipped.length;
 
-  // Nothing decided yet means nothing learned yet. Say nothing.
-  if (!decided) return "";
+  const reflections = Array.isArray(history.reflections)
+    ? history.reflections.filter((r) => r?.reflection)
+    : [];
+
+  // Nothing decided AND nothing concluded means nothing learned yet. Say
+  // nothing at all rather than showing an empty scaffold.
+  if (!decided && !reflections.length) return "";
 
   const lines = [
     "WHAT THIS COACH RESPONDS TO",
@@ -71,6 +86,21 @@ export function formatCoachMemory(history) {
     "not a set of rules, and their request for THIS upload still comes first.",
     "",
   ];
+
+  // ——— what we have already concluded (Phase 3.7) ———
+  // Placed first deliberately: this is the synthesis, and everything below it
+  // is the evidence behind it.
+  if (reflections.length) {
+    lines.push(
+      "WHAT YOU'VE LEARNED ABOUT THIS COACH SO FAR (newest first — your own",
+      "notes from past sessions):"
+    );
+    for (const r of reflections.slice(0, 5))
+      lines.push(`  - ${shorten(r.reflection, 400)}`);
+    lines.push("");
+  }
+
+  if (!decided) return lines.join("\n").trimEnd();
 
   // ——— approval rate by kind ———
   const byKind = new Map();
