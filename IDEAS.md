@@ -36,3 +36,15 @@ Good ideas that are NOT in SPEC.md for V1. Logged here instead of built.
   cut-placement half is the Phase C rhythm engine.)
 - **Transition variety tied to piece kind** — hype gets hard cuts on impact,
   story gets softer dissolves.
+
+- **Feed the scorecard back to the AI (Jack's idea, 2026-09-11).** The flags
+  from 3.1 are objective and already stored per piece — so the AI could be told
+  its own track record ("your last 20 pieces: 18 had hooks over 8 words") the
+  same way item 6 injects coach history. Two shapes: aggregate flags into the
+  prompt as a self-correction signal, or re-ask the composer when a piece comes
+  back flagged. The first is cheap and probably enough.
+  **Why it is not in this phase:** it changes how the AI writes, which the Data
+  Phase rules put off-limits. **Why it is a strong candidate for the first
+  judgment change after it:** unlike everything that went wrong in September, we
+  could actually prove it worked — count `hook_too_long` before and after. This
+  is the exact class of change the scorecard was built to make safe.
