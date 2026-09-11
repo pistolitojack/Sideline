@@ -62,3 +62,11 @@ Good ideas that are NOT in SPEC.md for V1. Logged here instead of built.
   a smell, and whether "hype" deserves its own pacing identity is a judgment
   question. Off-limits this phase; revisit with data on whether hype-chip
   sessions actually produce shorter shots than teaching-chip ones.
+
+- **Disclose review-behaviour tracking before real coaches sign up (flagged
+  2026-09-11).** Phase 3.5 silently records how long a coach looks at a reel,
+  whether they opened the detail, and how many revisions they asked for. That
+  is fine while Jack is the only user and it is his own data. The moment
+  another coach signs up it is behavioural tracking without notice — it belongs
+  in the privacy policy, and arguably deserves a line in onboarding. Cheap to
+  do, awkward to retrofit after launch.
