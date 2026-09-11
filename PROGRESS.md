@@ -56,6 +56,18 @@ item changes what the AI SEES or what WE CAN MEASURE.
   A missing signal column can never cost a coach their upload — the insert
   retries without them. 20 tests in `test/promptChips.test.mjs` (`npm test`).
   Migration: `supabase/v9-prompt-signal.sql`.
+- **3.4 Better skip reasons + the coach's own words** ✅ built — the skip sheet
+  now offers Weak hook / Wrong energy / Boring cut / Off-brand / Athlete-person
+  issue, each pointing at a different part of the pipeline so a pattern in them
+  is diagnostic (hook = the writer, cut = the editor, off-brand = the
+  director's read of the coach). Below them sits an optional single-line note:
+  "what would've made it better?" — saved to `content_pieces.skip_reason_text`
+  and surfaced on the admin piece view. *Design note:* tapping a reason now
+  SELECTS rather than commits, so the note stays reachable; that costs one
+  extra tap, and "Skip without saying why" still exits in one. Sheet state
+  resets on open so a note can never ride along with a later decision. A
+  missing column can't lose the decision — the update retries without it.
+  Migration: `supabase/v9-skip-detail.sql`.
 - **Baseline captured** — `BASELINE-PHASE-3-DATA.md`: the plan, all three
   pieces with shot lengths and flags, Jack's verbatim read, and the flag totals
   every later item is measured against.

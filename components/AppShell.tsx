@@ -59,18 +59,33 @@ export default function AppShell({
   const decide = (
     id: number | string,
     status: "approved" | "skipped",
-    reason?: string | null
+    reason?: string | null,
+    reasonText?: string | null
   ) => {
     setPieces((ps) =>
       ps.map((p) => (p.id === id ? { ...p, status, skipReason: reason } : p))
     );
     // Real pieces (uuid ids) persist; every approve/skip trains the employee.
     if (!demo && typeof id === "string" && hasSupabaseEnv()) {
-      createClient()
-        .from("content_pieces")
-        .update({ status, skip_reason: reason ?? null })
+      const db = createClient();
+      db.from("content_pieces")
+        .update({
+          status,
+          skip_reason: reason ?? null,
+          skip_reason_text: reasonText ?? null,
+        })
         .eq("id", id)
-        .then(undefined, () => {});
+        .then(({ error }) => {
+          // If v9-skip-detail.sql hasn't been run the column is missing and the
+          // whole update fails — which would lose the decision itself. Save
+          // what we can rather than drop the coach's choice on the floor.
+          if (error) {
+            db.from("content_pieces")
+              .update({ status, skip_reason: reason ?? null })
+              .eq("id", id)
+              .then(undefined, () => {});
+          }
+        }, () => {});
     }
   };
 

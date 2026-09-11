@@ -211,6 +211,9 @@ export default async function AdminSessionDetail({
                   {p.skip_reason && (
                     <Field label="skip reason">{p.skip_reason}</Field>
                   )}
+                  {p.skip_reason_text && (
+                    <Field label="coach's note">“{p.skip_reason_text}”</Field>
+                  )}
                   <Field label="shot lengths">
                     {segments
                       .map((s) => (Number(s.out) - Number(s.in)).toFixed(1))

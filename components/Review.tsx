@@ -6,7 +6,17 @@ import type { Piece } from "@/lib/types";
 import DayStrip from "./DayStrip";
 import Footage from "./Footage";
 
-const SKIP_REASONS = ["Bad moment", "Wrong vibe", "Don't post this athlete"];
+// Phase 3.4 — the reasons a coach actually rejects a reel for. Each one points
+// at a different part of the pipeline, so a pattern in these is diagnostic:
+// "Weak hook" is the writer, "Boring cut" is the editor, "Off-brand" is the
+// director's read of the coach.
+const SKIP_REASONS = [
+  "Weak hook",
+  "Wrong energy",
+  "Boring cut",
+  "Off-brand",
+  "Athlete/person issue",
+];
 
 export default function Review({
   pieces,
@@ -19,7 +29,8 @@ export default function Review({
   onDecision: (
     id: number | string,
     status: "approved" | "skipped",
-    reason?: string | null
+    reason?: string | null,
+    reasonText?: string | null
   ) => void;
   goToday: () => void;
   accent: string;
@@ -69,9 +80,9 @@ export default function Review({
     setTimeout(() => setToast(null), 1600);
     setTimeout(() => onDecision(p.id, "approved"), 380);
   };
-  const skip = (p: Piece, reason: string | null) => {
+  const skip = (p: Piece, reason: string | null, note: string | null) => {
     setHint(false);
-    setTimeout(() => onDecision(p.id, "skipped", reason), 340);
+    setTimeout(() => onDecision(p.id, "skipped", reason, note), 340);
   };
 
   return (
@@ -92,7 +103,7 @@ export default function Review({
         showHint={hint && doneCount === 0}
         onInteract={() => setHint(false)}
         onApprove={() => approve(piece)}
-        onSkip={(reason) => skip(piece, reason)}
+        onSkip={(reason, note) => skip(piece, reason, note)}
         onRevise={(note) => {
           setToast("Your editor is on it — check back in a few minutes");
           setTimeout(() => setToast(null), 2600);
@@ -138,11 +149,16 @@ function SwipeCard({
   showHint: boolean;
   onInteract: () => void;
   onApprove: () => void;
-  onSkip: (reason: string | null) => void;
+  onSkip: (reason: string | null, note: string | null) => void;
   onRevise: (note: string) => void;
 }) {
   const [dx, setDx] = useState(0);
   const [dragging, setDragging] = useState(false);
+  // Phase 3.4 — the skip sheet now holds a selection plus an optional note, so
+  // tapping a reason SELECTS it rather than committing. One extra tap buys the
+  // coach's own words, which is the part that actually teaches.
+  const [skipReason, setSkipReason] = useState<string | null>(null);
+  const [skipNote, setSkipNote] = useState("");
   const [fly, setFly] = useState<"left" | "right" | null>(null);
   const [sheet, setSheet] = useState(false);
   const [detail, setDetail] = useState(false);
@@ -162,13 +178,17 @@ function SwipeCard({
   };
   const askSkip = () => {
     onInteract();
+    // Start clean every time the sheet opens, so a note typed for one
+    // consideration can never ride along with a later decision.
+    setSkipReason(null);
+    setSkipNote("");
     setSheet(true);
     setDrag(-56);
   };
-  const skipWith = (reason: string | null) => {
+  const skipWith = (reason: string | null, note: string | null) => {
     setSheet(false);
     setFly("left");
-    onSkip(reason);
+    onSkip(reason, note?.trim() ? note.trim().slice(0, 300) : null);
   };
 
   const down = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -404,37 +424,80 @@ function SwipeCard({
               Optional. Your answer teaches your employee.
             </p>
             <div className="flex flex-col mt-4" style={{ gap: 8 }}>
-              {SKIP_REASONS.map((r) => (
-                <button
-                  key={r}
-                  onClick={() => skipWith(r)}
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 600,
-                    color: BASE.ink,
-                    background: BASE.paper,
-                    border: `1px solid ${BASE.faint}`,
-                    borderRadius: 14,
-                    padding: "13px 16px",
-                    textAlign: "left",
-                    cursor: "pointer",
-                  }}
-                >
-                  {r}
-                </button>
-              ))}
+              {SKIP_REASONS.map((r) => {
+                const on = skipReason === r;
+                return (
+                  <button
+                    key={r}
+                    aria-pressed={on}
+                    onClick={() => setSkipReason(on ? null : r)}
+                    style={{
+                      fontSize: 14,
+                      fontWeight: 600,
+                      color: on ? BASE.card : BASE.ink,
+                      background: on ? BASE.ink : BASE.paper,
+                      border: `1px solid ${on ? BASE.ink : BASE.faint}`,
+                      borderRadius: 14,
+                      padding: "13px 16px",
+                      textAlign: "left",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {r}
+                  </button>
+                );
+              })}
+
+              {/* Optional and visually quiet — a single line that grows only if
+                  the coach actually has something to say. */}
+              <textarea
+                value={skipNote}
+                onChange={(e) => setSkipNote(e.target.value.slice(0, 300))}
+                rows={1}
+                placeholder="Add a note (optional) — what would've made it better?"
+                style={{
+                  fontSize: 13,
+                  color: BASE.ink,
+                  background: BASE.card,
+                  border: `1px solid ${BASE.faint}`,
+                  borderRadius: 12,
+                  padding: "11px 14px",
+                  marginTop: 4,
+                  width: "100%",
+                  outline: "none",
+                  resize: "vertical",
+                  fontFamily: "inherit",
+                }}
+              />
+
               <button
-                onClick={() => skipWith(null)}
+                onClick={() => skipWith(skipReason, skipNote)}
+                style={{
+                  fontSize: 14,
+                  fontWeight: 700,
+                  color: BASE.card,
+                  background: BASE.ink,
+                  border: "none",
+                  borderRadius: 14,
+                  padding: "13px 16px",
+                  marginTop: 4,
+                  cursor: "pointer",
+                }}
+              >
+                Skip it
+              </button>
+              <button
+                onClick={() => skipWith(null, null)}
                 style={{
                   fontSize: 13,
                   color: BASE.muted,
                   background: "none",
                   border: "none",
-                  marginTop: 4,
+                  marginTop: 2,
                   cursor: "pointer",
                 }}
               >
-                Just skip
+                Skip without saying why
               </button>
             </div>
           </div>
