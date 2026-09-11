@@ -108,10 +108,12 @@ export function scorePiece({ edl, hook, targetLengthSec } = {}) {
   }
 
   // — hook length —
+  // Only count real words. Sideline's copy is full of spaced em dashes
+  // ("Freeze at the peak — this is..."), and counting one as a word would
+  // inflate every hook that uses the house style by one.
   const words = String(hook ?? "")
-    .trim()
     .split(/\s+/)
-    .filter(Boolean);
+    .filter((w) => /[\p{L}\p{N}]/u.test(w));
   if (words.length > HOOK_MAX_WORDS) flags.add("hook_too_long");
 
   return [...flags].sort();

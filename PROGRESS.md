@@ -20,6 +20,16 @@ item changes what the AI SEES or what WE CAN MEASURE.
   malformed input. `supabase/check-flags.sql` recomputes two checks
   independently in SQL to cross-verify against real data.
   Migration: `supabase/v9-piece-flags.sql`.
+  **Verified on real data 2026-09-11:** all three pieces returned `match` on
+  both the SQL cross-checks. The flags immediately earned their keep —
+  `hook_too_long` fired on all three hooks (10, 16 and 18 words against a limit
+  of 8), which Jack had not noticed at all, and `footage_repeated` fired on
+  both multi-shot pieces, almost certainly the same defect he described as "it
+  accidentally cut twice in the span of one second". Fixed one inaccuracy found
+  while reading the results: a spaced em dash counted as a word. 19 tests pass.
+- **Baseline captured** — `BASELINE-PHASE-3-DATA.md`: the plan, all three
+  pieces with shot lengths and flags, Jack's verbatim read, and the flag totals
+  every later item is measured against.
 
 ## Phase 3 — RESET to the baseline (2026-09-08)
 

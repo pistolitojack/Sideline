@@ -41,6 +41,8 @@ t("captions that touch exactly at 2.2s", { ...clean, edl: { ...clean.edl, captio
 t("same clip, non-overlapping ranges", { ...clean, edl: { ...clean.edl, segments: [seg("A", 0, 10), seg("A", 20, 30)] } }, []);
 t("single long shot (60s single, no target split)", { edl: { segments: [seg("A", 0, 40)], captions: [] }, hook: "Short hook", targetLengthSec: 40 }, []);
 t("hook of exactly 8 words", { ...clean, hook: "one two three four five six seven eight" }, []);
+t("spaced em dash is not a word", { ...clean, hook: "one two three — four five six seven eight" }, []);
+t("punctuation-only hook", { ...clean, hook: "— — — — — — — — — —" }, []);
 
 console.log("\n--- garbage in ---");
 t("no arguments at all", undefined, ["piece_too_short"]);
