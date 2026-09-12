@@ -1,6 +1,24 @@
 # Sideline — Build Progress
 
-## Phase 3 (v2) — The Data Phase
+## Phase 3 (v2) — The Data Phase ✅ COMPLETE
+
+**Result (`POST-PHASE-3-COMPARISON.md`, 2026-09-12):** flags 5 → 4 across the
+same 3-video empty-prompt test, one piece clean for the first time, hooks
+10/16/18 words → 4/11/15. The headline is not the flag count though — it is
+that Jack's skip note *"the same clip played twice"* travelled from the review
+screen into the director's recipe and out into the edit: shortest shot went
+**2.0s → 5.5s** with no cutting rule changed. First attributable quality change
+in the project's history.
+
+Two problems the run exposed, both open:
+1. The over-fit survives in the RAW HISTORY path. 3.7b hardened reflections,
+   but the director read a bare `montage: kept 0 of 1 (0%)` and concluded
+   "we're skipping montage since that format got rejected". Needs sample size
+   and context on the approval-rate block.
+2. `footage_repeated` has an upstream cause: the director gave a 17.1s cluster a
+   30s target, so the editor *had* to replay footage. Fixable in code by
+   clamping `target_length_sec` to the footage a piece's clusters actually hold.
+
 
 Nothing in this phase touches how the AI decides to cut, plan, or write. Every
 item changes what the AI SEES or what WE CAN MEASURE.
