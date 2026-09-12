@@ -10,14 +10,18 @@ screen into the director's recipe and out into the edit: shortest shot went
 **2.0s → 5.5s** with no cutting rule changed. First attributable quality change
 in the project's history.
 
-Two problems the run exposed, both open:
+Both problems below are now FIXED (2026-09-12, director prompt v2):
 1. The over-fit survives in the RAW HISTORY path. 3.7b hardened reflections,
    but the director read a bare `montage: kept 0 of 1 (0%)` and concluded
-   "we're skipping montage since that format got rejected". Needs sample size
-   and context on the approval-rate block.
+   "we're skipping montage since that format got rejected". FIXED: the block
+   now states sample sizes, withholds percentages below 5 decisions, and says
+   plainly that a rejected kind is a craft problem to fix rather than a format
+   to stop making.
 2. `footage_repeated` has an upstream cause: the director gave a 17.1s cluster a
-   30s target, so the editor *had* to replay footage. Fixable in code by
-   clamping `target_length_sec` to the footage a piece's clusters actually hold.
+   30s target, so the editor *had* to replay footage. FIXED in code:
+   `normalizePlan` now sums the duration of each piece's assigned clips and
+   trims the target to what actually exists (floor 8s). No prompt can fix a
+   length that is physically impossible.
 
 
 Nothing in this phase touches how the AI decides to cut, plan, or write. Every

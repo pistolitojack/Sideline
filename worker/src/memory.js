@@ -125,14 +125,28 @@ export function formatCoachMemory(history) {
     if (APPROVED.has(p.status)) e.yes += 1;
     byKind.set(k, e);
   }
+  // Below this, a percentage is theatre. "0%" off one piece reads as "never",
+  // which is exactly how the director came to write "we're skipping montage
+  // since that format got rejected" after ONE rejected montage.
+  const ENOUGH_TO_GENERALISE = 5;
+
   const kindRows = [...byKind.entries()]
     .sort((a, b) => b[1].total - a[1].total)
-    .map(
-      ([k, e]) => `  - ${k}: kept ${e.yes} of ${e.total} (${pct(e.yes, e.total)}%)`
+    .map(([k, e]) =>
+      e.total >= ENOUGH_TO_GENERALISE
+        ? `  - ${k}: kept ${e.yes} of ${e.total} (${pct(e.yes, e.total)}%)`
+        : `  - ${k}: kept ${e.yes} of ${e.total} — only ${e.total} piece${
+            e.total === 1 ? "" : "s"
+          }, too few to mean anything yet`
     );
   if (kindRows.length) {
     lines.push(
-      `They have decided on ${decided} piece${decided === 1 ? "" : "s"}. By kind:`,
+      `They have decided on ${decided} piece${decided === 1 ? "" : "s"}.`,
+      "These are TALLIES, NOT PREFERENCES. A kind that got rejected is almost",
+      "always a craft problem to fix, not a format to stop making — read the",
+      "rejection reason below before you conclude anything. Do not drop a kind",
+      "from your plan because a small number of them were rejected; make a",
+      "better one instead.",
       ...kindRows,
       ""
     );

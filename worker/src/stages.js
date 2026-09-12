@@ -110,7 +110,11 @@ const clampNum = (n, lo, hi, dflt) =>
 // craft/preference split) but starts at 1 with the rest, since nothing was
 // stamped before today and a version only means anything going forward.
 export const PROMPT_VERSIONS = {
-  director: 1,
+  // v2 (2026-09-12): the memory block now states sample sizes and says plainly
+  // that a rejected kind is a craft problem, not a format to drop. v1 showed a
+  // bare "montage: kept 0 of 1 (0%)" and the director concluded "we're
+  // skipping montage since that format got rejected".
+  director: 2,
   compose: 1,
   revise: 1,
   reflect: 1,
@@ -235,6 +239,29 @@ function normalizePlan(raw, assets) {
     .filter((c) => c.video_ids.length);
   const clusterIds = new Set(clusters.map((c) => c.cluster_id));
 
+  // How many seconds of footage each cluster actually holds. A piece cannot
+  // run longer than the video it is made from without replaying something —
+  // which is precisely how a 17.1s clip given a 30s target produced a reel
+  // that showed the same action twice. No prompt can fix that; the length has
+  // to be possible before the editor is asked for it.
+  const durationOf = Object.fromEntries(
+    assets.map((a) => [a.id, Number(a.duration_sec) || 0]),
+  );
+  const clusterSeconds = Object.fromEntries(
+    clusters.map((c) => [
+      c.cluster_id,
+      c.video_ids.reduce((sum, v) => sum + (durationOf[v] ?? 0), 0),
+    ]),
+  );
+  const allSeconds = assets.reduce(
+    (sum, a) => sum + (Number(a.duration_sec) || 0),
+    0,
+  );
+  const footageFor = (clusterIdsUsed) =>
+    clusterIdsUsed.length
+      ? clusterIdsUsed.reduce((sum, c) => sum + (clusterSeconds[c] ?? 0), 0)
+      : allSeconds;
+
   const maxPieces = Math.max(1, Math.min(5, assets.length + 2));
   let pieces = (Array.isArray(raw?.planned_pieces) ? raw.planned_pieces : [])
     .map((p, i) => ({
@@ -270,6 +297,20 @@ function normalizePlan(raw, assets) {
   for (const p of pieces) {
     if (!p.why_this_piece)
       p.why_this_piece = "A strong piece from today's session.";
+
+    // Never ask for more seconds than the assigned footage contains. The floor
+    // of 8s stops a very short clip from producing a target the composer will
+    // reject outright — it would rather build a short piece than none.
+    const available = footageFor(p.cluster_ids_to_use);
+    if (available > 0) {
+      const possible = Math.max(8, Math.floor(available));
+      if (p.target_length_sec > possible) {
+        console.log(
+          `  ${p.piece_id}: target ${p.target_length_sec}s trimmed to ${possible}s — its clips only hold ${available.toFixed(1)}s`,
+        );
+        p.target_length_sec = possible;
+      }
+    }
   }
 
   return {
