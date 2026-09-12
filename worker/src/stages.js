@@ -99,6 +99,39 @@ const clamp01 = (n) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
 const clampNum = (n, lo, hi, dflt) =>
   Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
 
+// Which version of each prompt is currently live.
+//
+// BUMP BY HAND when a prompt changes in a way worth measuring — a reworded
+// instruction that could change output, not a typo fix. Every piece records
+// the numbers it was made with, so a later question like "did compose v2
+// actually reduce hook_too_long?" has an answer instead of an opinion.
+//
+// All at 1 as of 2026-09-12. Reflect is already conceptually v2 (the
+// craft/preference split) but starts at 1 with the rest, since nothing was
+// stamped before today and a version only means anything going forward.
+export const PROMPT_VERSIONS = {
+  director: 1,
+  compose: 1,
+  revise: 1,
+  reflect: 1,
+};
+
+// Everything Phase 3 added to content_pieces that is a MEASUREMENT rather
+// than the piece itself. If a migration hasn't been run, one of these columns
+// is missing and the whole write fails — so every write can fall back to the
+// piece without them. The coach's reel matters more than our telemetry.
+const TELEMETRY_FIELDS = [
+  "flags",
+  "director_prompt_version",
+  "compose_prompt_version",
+  "revise_prompt_version",
+];
+const withoutTelemetry = (row) => {
+  const core = { ...row };
+  for (const k of TELEMETRY_FIELDS) delete core[k];
+  return core;
+};
+
 // A piece shorter than this is a glitch, not a reel.
 const MIN_PIECE_SEC = 6;
 // Gap between one caption leaving the screen and the next arriving.
@@ -846,18 +879,22 @@ async function composePlannedPiece({
     suggested_slot: String(draft.suggested_slot ?? "").slice(0, 40),
     suggested_sound: String(draft.suggested_sound ?? "").slice(0, 120),
     status: "ready",
+    // Which prompts built this piece (Phase 3.8).
+    director_prompt_version: PROMPT_VERSIONS.director,
+    compose_prompt_version: PROMPT_VERSIONS.compose,
   };
 
   let { error: insErr } = await db.from("content_pieces").insert(row);
-  // The scorecard must never be able to cost a coach their reels. If
-  // v9-piece-flags.sql hasn't been run, the column is missing and the whole
-  // insert fails — so drop the flags and save the piece.
+  // Telemetry must never be able to cost a coach their reels. If any Phase 3
+  // migration hasn't been run, that column is missing and the WHOLE insert
+  // fails — so drop every optional field and save the piece itself.
   if (insErr) {
     console.warn(
-      `  flags not saved (${insErr.message}) — run supabase/v9-piece-flags.sql`,
+      `  telemetry not saved (${insErr.message}) — a Phase 3 migration is missing`,
     );
-    const { flags: _dropped, ...withoutFlags } = row;
-    ({ error: insErr } = await db.from("content_pieces").insert(withoutFlags));
+    ({ error: insErr } = await db
+      .from("content_pieces")
+      .insert(withoutTelemetry(row)));
   }
   if (insErr) throw new Error(`insert piece: ${insErr.message}`);
   return true;
@@ -1455,19 +1492,19 @@ export async function revise({ session }) {
         render_asset_id: null,
         revision_note: null,
         revision_history: newHistory,
+        revise_prompt_version: PROMPT_VERSIONS.revise,
       };
 
       let { error: upErr } = await db
         .from("content_pieces")
         .update(patch)
         .eq("id", piece.id);
-      // Same rule as compose: a missing flags column must never cost the coach
-      // their revision.
+      // Same rule as compose: missing telemetry columns must never cost the
+      // coach their revision.
       if (upErr) {
-        const { flags: _dropped, ...withoutFlags } = patch;
         ({ error: upErr } = await db
           .from("content_pieces")
-          .update(withoutFlags)
+          .update(withoutTelemetry(patch))
           .eq("id", piece.id));
       }
       if (upErr) throw new Error(`apply revision: ${upErr.message}`);
@@ -1710,6 +1747,7 @@ export async function reflect({ session }) {
     craft_lesson: craft.slice(0, 1000) || null,
     preference_note: pref.slice(0, 500) || null,
     decisions_at_time: totalDecisions,
+    reflect_prompt_version: PROMPT_VERSIONS.reflect,
     // Kept in sync so older readers and the admin view still work.
     reflection: [craft, pref].filter(Boolean).join(" ").slice(0, 1000),
   });

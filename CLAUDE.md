@@ -33,6 +33,19 @@ whether he wants it before any work happens.
 - **After two failed patches on the same change, revert and rethink.** Do not
   patch a third time.
 
+## Open watch items
+
+- **Reflections (3.7b) are unverified on real data.** The craft/preference
+  split was built and trusted rather than tested. On the next few sessions,
+  check `craft_lesson` is specific and actionable, and that `preference_note`
+  stays EMPTY until a pattern genuinely holds across sessions. Remind Jack to
+  look. If a preference note appears from thin evidence, the bar is still
+  too low.
+- **When a prompt changes meaningfully, bump its number** in `PROMPT_VERSIONS`
+  (`worker/src/stages.js`). It is a manual act on purpose — bumping it means
+  "this is a real change worth measuring". Forgetting it makes the version
+  column lie, which is worse than not having it.
+
 ## Hard-won rules
 
 - **Never change how the AI decides without a way to measure whether it

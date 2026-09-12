@@ -130,6 +130,20 @@ item changes what the AI SEES or what WE CAN MEASURE.
   labelled "not reasons to stop making any kind of piece". Old single-paragraph
   rows still read. 35 memory tests. The bad note is deleted by the migration.
   Migration: `supabase/v10-reflection-split.sql`.
+- **3.8 Prompt version tracking** ✅ built — `PROMPT_VERSIONS` in
+  `worker/src/stages.js` (director/compose/revise/reflect, all at 1). Every
+  piece records the director and compose versions that made it, a revision
+  records the revise version, and a reflection records the reflect version.
+  Bumped BY HAND when a prompt changes meaningfully — deliberate, because
+  bumping it is a statement that a change is worth measuring; the rule lives in
+  `CLAUDE.md`. This is the ruler that makes the scorecard idea provable:
+  "compose v1 averaged 2.1 flags per piece, v2 averaged 0.9" is a sentence that
+  was impossible before. The admin piece view shows `d1·c1`.
+  *Also fixed while here:* the missing-column fallbacks only dropped `flags`,
+  so an unrun version migration would still have broken the pipeline. Replaced
+  with a named `withoutTelemetry()` helper covering every measurement field, so
+  the rule holds for anything Phase 3 adds later.
+  Migration: `supabase/v10-prompt-versions.sql`.
 - **Baseline captured** — `BASELINE-PHASE-3-DATA.md`: the plan, all three
   pieces with shot lengths and flags, Jack's verbatim read, and the flag totals
   every later item is measured against.

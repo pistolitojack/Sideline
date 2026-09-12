@@ -173,6 +173,16 @@ export default async function AdminSessionDetail({
                     {p.revision_count ? ` · ${p.revision_count} revision${p.revision_count === 1 ? "" : "s"}` : ""}
                   </span>
                 )}
+                {(p.director_prompt_version || p.compose_prompt_version) && (
+                  <span
+                    className="rounded-full border border-neutral-200 px-2 py-0.5 text-neutral-500"
+                    title="Which prompt versions built this piece (Phase 3.8)"
+                  >
+                    d{p.director_prompt_version ?? "?"}·c
+                    {p.compose_prompt_version ?? "?"}
+                    {p.revise_prompt_version ? `·r${p.revise_prompt_version}` : ""}
+                  </span>
+                )}
                 {flags.map((f) => (
                   <span
                     key={f}
