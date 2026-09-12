@@ -113,6 +113,23 @@ item changes what the AI SEES or what WE CAN MEASURE.
   rather than forcing a pattern. A failed reflection never fails the job; the
   coach already has their reels. 27 memory tests pass.
   Migration: `supabase/v9-reflections.sql`.
+- **3.7b Craft vs preference — the first reflection got it wrong, by design.**
+  Jack rejected ONE badly-cut montage (repeated footage) and the AI concluded
+  "prioritize standalone story-driven pieces over high-energy multi-drill cuts"
+  — a menu rule from a kitchen problem, which would have reached every future
+  session as fact. Root cause was the prompt: it asked what the AI learned
+  about the coach's "taste", which points at *which kinds they like* when the
+  feedback was about *how one was made*. Jack's framing: "the kinds are the
+  menu; my feedback is about the cooking."
+  The reflection now returns TWO fields — `craft_lesson` (required; applies to
+  every kind) and `preference_note` (usually empty; needs a pattern across
+  sessions) — so the mistake is structurally impossible rather than merely
+  discouraged. The prompt names the exact failure, drops the word "taste", and
+  is told the coach's LIFETIME decision count so it can tell 3 pieces from 300.
+  Memory renders them as separate blocks, with the craft block explicitly
+  labelled "not reasons to stop making any kind of piece". Old single-paragraph
+  rows still read. 35 memory tests. The bad note is deleted by the migration.
+  Migration: `supabase/v10-reflection-split.sql`.
 - **Baseline captured** — `BASELINE-PHASE-3-DATA.md`: the plan, all three
   pieces with shot lengths and flags, Jack's verbatim read, and the flag totals
   every later item is measured against.

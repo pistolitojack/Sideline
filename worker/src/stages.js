@@ -1630,10 +1630,26 @@ export async function reflect({ session }) {
     return bits.join(" · ");
   };
 
+  // How much evidence exists in total, not just this session. Without this the
+  // model cannot tell whether it has seen 3 pieces or 300, and it will
+  // confidently generalise from either.
+  const { count: lifetime } = await db
+    .from("content_pieces")
+    .select("id", { count: "exact", head: true })
+    .in("status", ["approved", "downloaded", "skipped"])
+    .in(
+      "session_id",
+      (
+        await db.from("sessions").select("id").eq("coach_id", coach.id)
+      ).data?.map((r) => r.id) ?? [],
+    );
+  const totalDecisions = Number(lifetime ?? decided.length);
+
   const reply = await askClaude({
     system:
-      "You are Sideline's learning brain. You synthesize a coach's taste from " +
-      "what they kept and rejected. You reply with exactly one JSON object.",
+      "You are Sideline's learning brain. You separate how a piece was MADE " +
+      "from which KINDS of piece a coach wants, because confusing the two " +
+      "makes the product worse. You reply with exactly one JSON object.",
     content: [
       {
         type: "text",
@@ -1646,26 +1662,44 @@ export async function reflect({ session }) {
           "WHAT YOU MADE, AND WHAT THEY DID WITH IT:",
           ...decided.map(describe),
           "",
-          "Write a 2-3 sentence learning note, in first person, capturing what",
-          "you learned about THIS coach's taste. It will guide future sessions",
-          "for them, so make it something you could act on.",
-          "Do NOT restate the raw data — synthesize a preference.",
-          'Good example: "They approve teaching pieces about technique details',
-          'but skip pure hype clips — the hook has to promise a specific',
-          'learning payoff."',
-          "If one session genuinely is not enough to conclude anything, say so",
-          "plainly rather than inventing a pattern.",
+          `EVIDENCE SO FAR: this coach has made ${totalDecisions} decision${
+            totalDecisions === 1 ? "" : "s"
+          } in total, across all sessions (${decided.length} in this one).`,
           "",
-          'Return ONLY: {"reflection": "..."}',
+          "Write TWO separate things.",
+          "",
+          "1. craft_lesson — REQUIRED. What to do BETTER next time, about how",
+          "   pieces are made. This applies to EVERY kind of piece. Cut timing,",
+          "   hook length, letting a rep finish, repeated footage, copy that",
+          "   doesn't match the footage. Be specific and actionable — something",
+          "   you could follow tomorrow. If they approved something after a fix,",
+          "   note what worked, not only what failed.",
+          "",
+          "2. preference_note — USUALLY EMPTY. Only fill this in if there is",
+          "   real evidence that this coach does not want a KIND of piece at",
+          "   all — a pattern holding across MULTIPLE sessions, not one bad",
+          "   example. Leave it as \"\" otherwise.",
+          "",
+          "THE MISTAKE TO AVOID, and it is the whole reason these are separate:",
+          "a piece rejected for HOW IT WAS MADE is a craft lesson, never a",
+          "reason to stop making that kind. If they rejected a montage because",
+          "clips repeated, the lesson is \"do not reuse overlapping footage\" —",
+          "NOT \"make fewer montages\". The kinds are the menu; their feedback",
+          "is almost always about the cooking. Removing something from the menu",
+          "on thin evidence silently costs them content they would have wanted.",
+          "",
+          'Return ONLY: {"craft_lesson": "...", "preference_note": ""}',
         ].join("\n"),
       },
     ],
-    maxTokens: 500,
+    maxTokens: 600,
     label: "reflect",
   });
 
-  const text = String(extractJson(reply)?.reflection ?? "").trim();
-  if (!text) {
+  const draft = extractJson(reply) ?? {};
+  const craft = String(draft.craft_lesson ?? "").trim();
+  const pref = String(draft.preference_note ?? "").trim();
+  if (!craft && !pref) {
     console.warn("  reflection came back empty — nothing saved");
     return null;
   }
@@ -1673,13 +1707,18 @@ export async function reflect({ session }) {
   const { error } = await db.from("coach_reflections").insert({
     coach_id: coach.id,
     session_id: session.id,
-    reflection: text.slice(0, 1000),
+    craft_lesson: craft.slice(0, 1000) || null,
+    preference_note: pref.slice(0, 500) || null,
+    decisions_at_time: totalDecisions,
+    // Kept in sync so older readers and the admin view still work.
+    reflection: [craft, pref].filter(Boolean).join(" ").slice(0, 1000),
   });
   if (error) {
     // Never fail a job over a learning note. The coach already has their reels.
-    console.warn(`  reflection not saved (${error.message}) — run supabase/v9-reflections.sql`);
+    console.warn(`  reflection not saved (${error.message}) — run supabase/v10-reflection-split.sql`);
     return null;
   }
+  const text = craft || pref;
   console.log(`  learned: ${text.slice(0, 160)}`);
   return null;
 }

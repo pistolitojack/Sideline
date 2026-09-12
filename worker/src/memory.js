@@ -43,7 +43,7 @@ export async function loadCoachHistory(db, coachId) {
   // separately because it survives even when raw history is thin.
   const { data: reflections } = await db
     .from("coach_reflections")
-    .select("reflection, created_at")
+    .select("reflection, craft_lesson, preference_note, created_at")
     .eq("coach_id", coachId)
     .order("created_at", { ascending: false })
     .limit(5);
@@ -71,9 +71,14 @@ export function formatCoachMemory(history) {
   const skipped = pieces.filter((p) => p.status === "skipped");
   const decided = approved.length + skipped.length;
 
-  const reflections = Array.isArray(history.reflections)
-    ? history.reflections.filter((r) => r?.reflection)
-    : [];
+  // Craft lessons and preference notes are kept apart all the way through.
+  // Collapsing them here would undo the point of splitting them at all.
+  const rows = Array.isArray(history.reflections) ? history.reflections : [];
+  const crafts = rows
+    .map((r) => r?.craft_lesson || (r?.preference_note ? null : r?.reflection))
+    .filter(Boolean);
+  const prefs = rows.map((r) => r?.preference_note).filter(Boolean);
+  const reflections = [...crafts, ...prefs];
 
   // Nothing decided AND nothing concluded means nothing learned yet. Say
   // nothing at all rather than showing an empty scaffold.
@@ -90,13 +95,22 @@ export function formatCoachMemory(history) {
   // ——— what we have already concluded (Phase 3.7) ———
   // Placed first deliberately: this is the synthesis, and everything below it
   // is the evidence behind it.
-  if (reflections.length) {
+  if (crafts.length) {
     lines.push(
-      "WHAT YOU'VE LEARNED ABOUT THIS COACH SO FAR (newest first — your own",
-      "notes from past sessions):"
+      "WHAT YOU'VE LEARNED TO DO BETTER (newest first — your own notes from",
+      "past sessions). These are about HOW to make a piece and apply to EVERY",
+      "kind. They are not reasons to stop making any kind of piece:"
     );
-    for (const r of reflections.slice(0, 5))
-      lines.push(`  - ${shorten(r.reflection, 400)}`);
+    for (const r of crafts.slice(0, 5)) lines.push(`  - ${shorten(r, 400)}`);
+    lines.push("");
+  }
+
+  if (prefs.length) {
+    lines.push(
+      "WHAT THEY SEEM TO PREFER (patterns held across sessions — still worth",
+      "testing, and always outranked by what they ask for today):"
+    );
+    for (const r of prefs.slice(0, 3)) lines.push(`  - ${shorten(r, 400)}`);
     lines.push("");
   }
 

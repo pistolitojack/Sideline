@@ -70,28 +70,63 @@ for (const bad of [{}, { pieces: null, sessions: null }, { pieces: [{}], session
   catch (e) { check(`survives ${JSON.stringify(bad)}`, false, e.message); }
 }
 
-console.log("\n--- reflections (Phase 3.7) ---");
+console.log("\n--- reflections: craft vs preference (Phase 3.7b) ---");
 const withRef = formatCoachMemory({
   sessions: [{ id: "s1" }],
   pieces: [{ status: "approved", piece_kind: "teaching", hook: "Kept this" }],
   reflections: [
-    { reflection: "They keep teaching pieces that name a specific technique detail." },
-    { reflection: "Hype clips get skipped unless the hook promises a payoff." },
+    { craft_lesson: "Never reuse overlapping footage in one cut.", preference_note: "" },
+    { craft_lesson: "Hooks must land in the first second.", preference_note: "" },
   ],
 });
-check("shows the learned-so-far block", withRef.includes("WHAT YOU'VE LEARNED ABOUT THIS COACH SO FAR"));
-check("newest reflection first", withRef.indexOf("specific technique detail") < withRef.indexOf("promises a payoff"));
-check("conclusions come BEFORE the evidence", withRef.indexOf("LEARNED ABOUT THIS COACH") < withRef.indexOf("PIECES THEY KEPT"));
+check("shows the craft block", withRef.includes("WHAT YOU'VE LEARNED TO DO BETTER"));
+check("newest craft lesson first",
+  withRef.indexOf("overlapping footage") < withRef.indexOf("first second"));
+check("craft comes BEFORE the evidence",
+  withRef.indexOf("LEARNED TO DO BETTER") < withRef.indexOf("PIECES THEY KEPT"));
+check("tells the director craft is not a reason to stop making a kind",
+  withRef.includes("not reasons to stop making any kind"));
+check("no preference block when there are no preferences",
+  !withRef.includes("WHAT THEY SEEM TO PREFER"), withRef);
 
+const withPref = formatCoachMemory({
+  sessions: [{ id: "s1" }],
+  pieces: [{ status: "skipped", piece_kind: "hype", hook: "x" }],
+  reflections: [
+    { craft_lesson: "Let the rep finish.", preference_note: "Hype pieces rejected 6 of 7 across four sessions." },
+  ],
+});
+check("shows both blocks when both exist", withPref.includes("WHAT YOU'VE LEARNED TO DO BETTER") && withPref.includes("WHAT THEY SEEM TO PREFER"));
+check("craft block comes before preference block",
+  withPref.indexOf("LEARNED TO DO BETTER") < withPref.indexOf("SEEM TO PREFER"));
+check("preference is framed as still-testing, outranked by today's request",
+  withPref.includes("still worth") && withPref.includes("outranked by what they ask"));
+check("a craft lesson never appears in the preference block",
+  !withPref.split("SEEM TO PREFER")[1].includes("Let the rep finish"));
+
+console.log("\n--- old rows written before the split still read ---");
+const legacy = formatCoachMemory({
+  sessions: [{ id: "s1" }],
+  pieces: [{ status: "approved", piece_kind: "story", hook: "y" }],
+  reflections: [{ reflection: "An older single-paragraph note." }],
+});
+check("legacy reflection still surfaces", legacy.includes("An older single-paragraph note"));
+
+console.log("\n--- reflections alone, and silence ---");
 const refOnly = formatCoachMemory({
   sessions: [{ id: "s1" }],
   pieces: [{ status: "ready", hook: "undecided" }],
-  reflections: [{ reflection: "Too early to tell what they prefer." }],
+  reflections: [{ craft_lesson: "Too early to tell much." }],
 });
 check("reflections alone can carry the section", refOnly.includes("Too early to tell"));
 check("no empty stats block when nothing is decided", !refOnly.includes("By kind:"), refOnly);
 check("no reflections + no decisions still means silence",
   formatCoachMemory({ sessions: [{}], pieces: [], reflections: [] }) === "");
+check("empty preference strings are not shown",
+  !formatCoachMemory({
+    sessions: [{}], pieces: [{ status: "approved", hook: "z" }],
+    reflections: [{ craft_lesson: "A lesson.", preference_note: "" }],
+  }).includes("SEEM TO PREFER"));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
