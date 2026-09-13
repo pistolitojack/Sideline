@@ -1,3 +1,40 @@
+SIDELINE — ONBOARDING SNAPSHOT
+Generated 2026-09-13 from commit 945c914 (branch main).
+
+Scope: the onboarding flow only — the screens a new coach sees before they can
+upload anything, the code that saves what they enter, and the shape of the
+table it saves into.
+
+HOW ONBOARDING IS REACHED
+  A signed-in user with no row in `coaches` is redirected to /onboarding by
+  app/page.tsx ("if (!coachRow) redirect('/onboarding')"). proxy.ts gates
+  everything except /login, /auth, /terms and /privacy behind a session.
+
+HOW ONBOARDING SAVES
+  There is NO dedicated onboarding API route. app/onboarding/page.tsx is a
+  client component that upserts directly into the `coaches` table with the
+  browser Supabase client, protected by row-level security (a coach may only
+  write a row whose auth_user_id matches their own).
+
+  The ONE API route involved is /api/transcribe, which turns the recorded
+  voice memo into text (Deepgram) so it can be stored on the coach row. It is
+  shared with VoiceMemoSheet, which offers the same recording flow after
+  onboarding.
+
+  NOTE ON THE SCHEMA BELOW: this is the schema as defined by the repo's
+  migrations, which is the authoritative source. It is not a dump of the live
+  Supabase database. To confirm the two agree, run:
+
+    select column_name, data_type, is_nullable, column_default
+    from information_schema.columns
+    where table_name = 'coaches'
+    order by ordinal_position;
+
+===============================================================================
+
+FILE: app/onboarding/page.tsx
+(the whole onboarding flow — every step, and the upsert into `coaches`)
+-------------------------------------------------------------------------------
 "use client";
 
 // Onboarding — "The Interview" (SPEC.md screens §2, design from the prototype):
@@ -17,17 +54,6 @@ const SPORTS = [
   "Combat sports",
 ];
 const TONES = ["Direct", "Encouraging", "No-nonsense", "Funny", "Technical"];
-// P1 fix: who the coach actually trains. Previously hardcoded to
-// "Youth athletes & their parents" for everyone, while the AI read it four
-// times and treated it as fact. Nothing is pre-selected — a default here is a
-// confident lie the AI cannot tell apart from a real answer.
-const AUDIENCES = [
-  "Youth athletes & their parents",
-  "High school athletes",
-  "College & pro athletes",
-  "Adult general fitness",
-  "Combat sports athletes",
-];
 const MISSIONS = [
   "More private clients",
   "Fill the fall program",
@@ -162,8 +188,6 @@ export default function OnboardingPage() {
   const [sport, setSport] = useState("Speed & agility");
   const [accent, setAccent] = useState<Accent>(ACCENTS[0]);
   const [tones, setTones] = useState<string[]>(["Direct", "Encouraging"]);
-  const [audience, setAudience] = useState("");
-  const [customAudience, setCustomAudience] = useState("");
   const [mission, setMission] = useState("More private clients");
   const [customMission, setCustomMission] = useState("");
   const [city, setCity] = useState("");
@@ -178,11 +202,6 @@ export default function OnboardingPage() {
   const chunksRef = useRef<BlobPart[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // P3 fix: the handle already on file. The save used to null out ig_profile
-  // unconditionally, so fixing a typo in your name destroyed the scraped
-  // Instagram summary the AI uses five times.
-  const savedHandle = useRef<string | null>(null);
-
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -193,23 +212,6 @@ export default function OnboardingPage() {
       if (timerRef.current) clearInterval(timerRef.current);
       recorderRef.current?.stream.getTracks().forEach((t) => t.stop());
     };
-  }, []);
-
-  // Load the handle already on file so the save can tell whether it changed.
-  useEffect(() => {
-    (async () => {
-      const supabase = createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return;
-      const { data } = await supabase
-        .from("coaches")
-        .select("ig_handle")
-        .eq("auth_user_id", user.id)
-        .maybeSingle();
-      savedHandle.current = data?.ig_handle ?? null;
-    })();
   }, []);
 
   const startScan = () => {
@@ -294,7 +296,6 @@ export default function OnboardingPage() {
         router.push("/login");
         return;
       }
-      const newHandle = handle.trim() || null;
       // Upsert: running onboarding again UPDATES the coach's profile.
       const { error } = await supabase.from("coaches").upsert(
         {
@@ -303,15 +304,12 @@ export default function OnboardingPage() {
           sport,
           tones,
           accent_hex: accent.a,
-          audience: customAudience.trim() || audience,
+          audience: "Youth athletes & their parents",
           mission: customMission.trim() || mission,
           city: city.trim() || null,
-          ig_handle: newHandle,
+          ig_handle: handle.trim() || null,
           voice_memo_transcript: transcript || null,
-          // Only discard the scraped Instagram summary when the handle
-          // ACTUALLY changed. Omitting the key leaves the stored value alone,
-          // because upsert only writes the columns it is given.
-          ...(newHandle !== savedHandle.current ? { ig_profile: null } : {}),
+          ig_profile: null, // new handle → fresh scan on the next session
         },
         { onConflict: "auth_user_id" }
       );
@@ -747,54 +745,11 @@ export default function OnboardingPage() {
       {step === 4 && (
         <>
           <H
-            kicker={`5 of ${total} · Who it's for`}
-            title="Who are you making this for?"
-            sub="Your employee writes every hook and call-to-action at these people. Get this right and everything downstream aims at the right audience."
+            kicker={`5 of ${total} · The mission`}
+            title="What's the mission right now?"
+            sub="One goal. Every clip choice, hook, and call-to-action aims at it. Change it any time with one tap — you'll never be quizzed."
           />
           <div className="flex flex-wrap" style={{ gap: 8, marginTop: 18 }}>
-            {AUDIENCES.map((a) => (
-              <Chip
-                key={a}
-                label={a}
-                on={audience === a && !customAudience.trim()}
-                onClick={() => {
-                  setAudience(a);
-                  setCustomAudience("");
-                }}
-                ac={ac}
-              />
-            ))}
-          </div>
-          <input
-            value={customAudience}
-            onChange={(e) => setCustomAudience(e.target.value)}
-            placeholder="Or describe them yourself…"
-            style={{
-              fontSize: 14,
-              fontWeight: 600,
-              color: BASE.ink,
-              background: BASE.card,
-              border: `1.5px solid ${BASE.faint}`,
-              borderRadius: 14,
-              padding: "13px 16px",
-              width: "100%",
-              marginTop: 12,
-              outline: "none",
-            }}
-          />
-
-          <p
-            style={{
-              fontSize: 13,
-              fontWeight: 700,
-              color: BASE.ink,
-              marginTop: 22,
-              marginBottom: 7,
-            }}
-          >
-            And the mission right now?
-          </p>
-          <div className="flex flex-wrap" style={{ gap: 8 }}>
             {MISSIONS.map((m) => (
               <Chip
                 key={m}
@@ -826,12 +781,7 @@ export default function OnboardingPage() {
             }}
           />
           <div className="flex-1" />
-          <ObButton
-            label="Continue"
-            onClick={() => setStep(5)}
-            ac={ac}
-            disabled={!(customAudience.trim() || audience)}
-          />
+          <ObButton label="Continue" onClick={() => setStep(5)} ac={ac} />
         </>
       )}
 
@@ -876,3 +826,467 @@ export default function OnboardingPage() {
     </div>
   );
 }
+
+FILE: app/api/transcribe/route.ts
+(voice memo -> text; the only server route onboarding calls)
+-------------------------------------------------------------------------------
+import { NextResponse } from "next/server";
+import { createClient, hasSupabaseEnv } from "@/lib/supabase/server";
+
+// transcribe(file) — wraps Deepgram so the provider can be swapped later (SPEC).
+async function transcribe(audio: Blob, contentType: string): Promise<string> {
+  const key = process.env.DEEPGRAM_API_KEY;
+  if (!key) throw new Error("no-key");
+
+  const res = await fetch(
+    "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Token ${key}`,
+        "Content-Type": contentType || "audio/webm",
+      },
+      body: Buffer.from(await audio.arrayBuffer()),
+    }
+  );
+  if (!res.ok) throw new Error(`deepgram-${res.status}`);
+  const json = await res.json();
+  return (
+    json?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? ""
+  );
+}
+
+export async function POST(request: Request) {
+  // Only signed-in coaches may use the transcription key.
+  if (hasSupabaseEnv()) {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json(
+        { error: "Please sign in first." },
+        { status: 401 }
+      );
+    }
+  }
+
+  const form = await request.formData();
+  const audio = form.get("audio");
+  if (!(audio instanceof Blob) || audio.size === 0) {
+    return NextResponse.json(
+      { error: "No recording received — try again." },
+      { status: 400 }
+    );
+  }
+  if (audio.size > 25 * 1024 * 1024) {
+    return NextResponse.json(
+      { error: "That recording is too long — keep it under a minute." },
+      { status: 400 }
+    );
+  }
+
+  try {
+    const transcript = await transcribe(audio, audio.type);
+    return NextResponse.json({ transcript });
+  } catch (e) {
+    const msg = e instanceof Error && e.message === "no-key"
+      ? "Transcription isn't set up yet (missing Deepgram key) — you can skip this step."
+      : "We couldn't transcribe that — you can try again or skip this step.";
+    return NextResponse.json({ error: msg }, { status: 502 });
+  }
+}
+
+FILE: components/VoiceMemoSheet.tsx
+(same record-and-transcribe flow, offered after onboarding from the Today tab)
+-------------------------------------------------------------------------------
+"use client";
+
+// The onboarding voice memo, available any time from Today — for coaches who
+// skipped it (or want a re-take). Records up to 60s in the browser,
+// transcribes via /api/transcribe, saves to the coach's profile.
+
+import { useEffect, useRef, useState } from "react";
+import { BASE } from "@/lib/design";
+import { createClient } from "@/lib/supabase/client";
+
+const MAX_SECONDS = 60;
+
+export default function VoiceMemoSheet({
+  coachId,
+  accent,
+  onClose,
+  onSaved,
+}: {
+  coachId: string;
+  accent: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [rec, setRec] = useState<
+    "idle" | "recording" | "processing" | "saving" | "done"
+  >("idle");
+  const [seconds, setSeconds] = useState(0);
+  const [note, setNote] = useState<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<BlobPart[]>([]);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      recorderRef.current?.stream.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  const stop = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    recorderRef.current?.stop();
+  };
+
+  const startRecording = async () => {
+    setNote(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      recorderRef.current = recorder;
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => chunksRef.current.push(e.data);
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setRec("processing");
+        const blob = new Blob(chunksRef.current, {
+          type: recorder.mimeType || "audio/webm",
+        });
+        try {
+          const form = new FormData();
+          form.append("audio", blob, "memo.webm");
+          const res = await fetch("/api/transcribe", {
+            method: "POST",
+            body: form,
+          });
+          const json = await res.json();
+          if (!res.ok || !json.transcript) {
+            setNote(json.error || "We couldn't transcribe that — try again.");
+            setRec("idle");
+            return;
+          }
+          setRec("saving");
+          const { error } = await createClient()
+            .from("coaches")
+            .update({ voice_memo_transcript: json.transcript })
+            .eq("id", coachId);
+          if (error) {
+            setNote("Saving didn't work — try again in a moment.");
+            setRec("idle");
+            return;
+          }
+          setRec("done");
+          onSaved();
+        } catch {
+          setNote("We couldn't transcribe that — check your connection.");
+          setRec("idle");
+        }
+      };
+      recorder.start();
+      setRec("recording");
+      setSeconds(0);
+      timerRef.current = setInterval(() => {
+        setSeconds((s) => {
+          if (s + 1 >= MAX_SECONDS) stop();
+          return s + 1;
+        });
+      }, 1000);
+    } catch {
+      setNote("We couldn't reach your microphone — check permissions.");
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 flex flex-col justify-end"
+      style={{ background: "rgba(0,0,0,0.5)", zIndex: 50 }}
+      onClick={rec === "recording" ? undefined : onClose}
+    >
+      <div
+        className="sl-rise"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "#111009",
+          borderRadius: "26px 26px 0 0",
+          padding: "26px 24px calc(30px + env(safe-area-inset-bottom))",
+          maxWidth: 430,
+          margin: "0 auto",
+          width: "100%",
+          textAlign: "center",
+        }}
+      >
+        <div
+          style={{
+            width: 36,
+            height: 4,
+            borderRadius: 4,
+            background: "rgba(255,255,255,0.25)",
+            margin: "0 auto 18px",
+          }}
+        />
+        <p
+          style={{
+            fontSize: 11,
+            fontWeight: 700,
+            letterSpacing: "0.1em",
+            color: "rgba(255,255,255,0.45)",
+            textTransform: "uppercase",
+          }}
+        >
+          Your voice
+        </p>
+        <p
+          style={{
+            fontSize: 20,
+            fontWeight: 800,
+            color: "#fff",
+            letterSpacing: "-0.02em",
+            lineHeight: 1.35,
+            marginTop: 10,
+          }}
+        >
+          &ldquo;What do most coaches get wrong about training young
+          athletes?&rdquo;
+        </p>
+        <p
+          style={{
+            fontSize: 13,
+            color: "rgba(255,255,255,0.55)",
+            marginTop: 8,
+            lineHeight: 1.5,
+          }}
+        >
+          Talk for up to 60 seconds. Your employee copies how you sound — your
+          rhythm and word choice — never what you say here.
+        </p>
+        <button
+          onClick={() =>
+            rec === "idle"
+              ? startRecording()
+              : rec === "recording"
+              ? stop()
+              : undefined
+          }
+          className={rec === "recording" ? "sl-pulse" : ""}
+          style={{
+            width: 84,
+            height: 84,
+            borderRadius: 999,
+            marginTop: 26,
+            cursor: "pointer",
+            border:
+              rec === "done"
+                ? `3px solid ${BASE.good}`
+                : "3px solid rgba(255,255,255,0.22)",
+            background:
+              rec === "done"
+                ? BASE.good
+                : rec === "processing" || rec === "saving"
+                ? "#2E2B24"
+                : accent,
+            color: "#fff",
+            fontSize: 28,
+            transition: "all 0.3s",
+          }}
+        >
+          {rec === "done" ? "✓" : rec === "recording" ? "■" : "●"}
+        </button>
+        <p
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: "rgba(255,255,255,0.7)",
+            marginTop: 14,
+            minHeight: 20,
+          }}
+        >
+          {rec === "idle" && "Tap to record"}
+          {rec === "recording" &&
+            `Listening… ${MAX_SECONDS - seconds}s left · tap to finish`}
+          {rec === "processing" && "Writing it down…"}
+          {rec === "saving" && "Saving…"}
+          {rec === "done" && "Got it. I'll write like you talk."}
+        </p>
+        {note && (
+          <p
+            style={{
+              fontSize: 12.5,
+              color: "#F2B8B5",
+              marginTop: 8,
+              lineHeight: 1.5,
+            }}
+          >
+            {note}
+          </p>
+        )}
+        <button
+          onClick={onClose}
+          style={{
+            border: "none",
+            cursor: "pointer",
+            borderRadius: 16,
+            background: rec === "done" ? accent : "#2E2B24",
+            color: "#fff",
+            fontSize: 15,
+            fontWeight: 700,
+            padding: "15px 0",
+            width: "100%",
+            marginTop: 22,
+          }}
+        >
+          {rec === "done" ? "Done" : "Close"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+FILE: lib/design.ts
+(supporting: ACCENTS is the brand-colour list the coach picks from)
+-------------------------------------------------------------------------------
+// Design tokens lifted from sideline-prototype-v3.jsx — the single source of truth
+// for the app's look. The accent color becomes dynamic (per coach) in Phase 2.
+
+export const SYS =
+  "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif";
+
+export const BASE = {
+  paper: "#F6F5F2",
+  card: "#FFFFFF",
+  ink: "#1A1915",
+  muted: "#8A867C",
+  faint: "#E8E6E0",
+  good: "#1E7F4F",
+};
+
+export type Accent = { name: string; a: string; d: string };
+
+export const ACCENTS: Accent[] = [
+  { name: "Signal Red", a: "#C8102E", d: "#7E0A1D" },
+  { name: "Court Blue", a: "#1D4FD7", d: "#122F84" },
+  { name: "Turf Green", a: "#0E7C4A", d: "#08522F" },
+  { name: "Heat Orange", a: "#E35311", d: "#93330A" },
+];
+
+export const TYPE_COLORS: Record<string, string> = {
+  Montage: "#0E7C4A",
+  Teaching: "#C8102E",
+  Hype: "#D97706",
+  Story: "#8A4FBF",
+  "Behind the scenes": "#3B5BDB",
+};
+
+FILE: lib/supabase/client.ts
+(supporting: the browser client onboarding writes through)
+-------------------------------------------------------------------------------
+"use client";
+
+import { createBrowserClient } from "@supabase/ssr";
+
+export const hasSupabaseEnv = () =>
+  Boolean(
+    process.env.NEXT_PUBLIC_SUPABASE_URL &&
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  );
+
+export function createClient() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
+FILE: supabase/schema.sql  [extract: coaches table + its RLS]
+-------------------------------------------------------------------------------
+create table if not exists coaches (
+  id uuid primary key default gen_random_uuid(),
+  auth_user_id uuid not null unique references auth.users (id) on delete cascade,
+  name text not null,
+  sport text,
+  tones text[] default '{}',
+  accent_hex text default '#C8102E',
+  audience text,
+  mission text,
+  ig_handle text,
+  voice_memo_transcript text,
+  is_active boolean default false,
+  created_at timestamptz default now()
+);
+
+-- row-level security on coaches:
+alter table coaches enable row level security;
+create policy "own coach row - select" on coaches
+  for select using (auth_user_id = auth.uid());
+create policy "own coach row - insert" on coaches
+  for insert with check (auth_user_id = auth.uid());
+create policy "own coach row - update" on coaches
+  for update using (auth_user_id = auth.uid());
+
+FILE: supabase/v4-ig-profile.sql
+(migration: added ig_profile)
+-------------------------------------------------------------------------------
+-- V2 creative engine part 3: scanned Instagram brand brief.
+-- Run ONCE in Supabase: SQL Editor → New snippet → paste → Run.
+
+alter table coaches add column if not exists ig_profile text;
+
+select 'ig_profile column ready' as result;
+
+FILE: supabase/v6-coach-city.sql
+(migration: added city)
+-------------------------------------------------------------------------------
+-- Phase 1.2: coach location. A city ("City, State") that later shapes
+-- location hashtags and audience tuning. Nullable — soft-required, not hard.
+-- Run ONCE in Supabase: SQL Editor → New query → paste → Run.
+
+alter table coaches add column if not exists city text;
+
+select 'city column ready' as result;
+
+FILE: supabase/v6-ig-refresh.sql
+(migration: added scanned_at)
+-------------------------------------------------------------------------------
+-- Phase 1.5: Instagram profile refresh. Tracks when the coach's IG was last
+-- scanned so the worker can re-scan if it's null or older than 30 days.
+-- Run ONCE in Supabase: SQL Editor → New query → paste → Run.
+
+alter table coaches add column if not exists scanned_at timestamptz;
+
+select 'scanned_at column ready' as result;
+
+FILE: supabase/v9-founder-ratings.sql  [extract: the only later change to coaches]
+-------------------------------------------------------------------------------
+-- Adds a READ policy so the founder's admin view can see every coach. No
+-- columns added; a coach's own access is unchanged (Postgres ORs policies).
+drop policy if exists "admin reads all coaches" on coaches;
+create policy "admin reads all coaches" on coaches for select using (is_admin());
+
+===============================================================================
+THE `coaches` TABLE AS IT STANDS TODAY
+===============================================================================
+
+  column                 type          set during onboarding?
+  ---------------------  ------------  ----------------------------------------
+  id                     uuid          no (generated)
+  auth_user_id           uuid          yes (from the session)
+  name                   text          YES
+  sport                  text          YES
+  tones                  text[]        YES
+  accent_hex             text          YES (brand colour)
+  audience               text          YES
+  mission                text          YES
+  ig_handle              text          YES (optional)
+  voice_memo_transcript  text          YES (optional, via /api/transcribe)
+  is_active              boolean       yes (flipped when onboarding completes)
+  created_at             timestamptz   no (default now())
+  ig_profile             text          no — written later by the worker's
+                                       Instagram scan (v4)
+  city                   text          YES (v6)
+  scanned_at             timestamptz   no — set by the worker when it scans
+                                       their Instagram (v6)

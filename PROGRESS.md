@@ -1,5 +1,31 @@
 # Sideline — Build Progress
 
+## Onboarding fixes (2026-09-13)
+
+An audit of the onboarding flow ahead of a planning conversation turned up nine
+issues (`ONBOARDING-COVER-NOTE.txt`). Two were fixed immediately because they
+are unambiguous defects, not design questions:
+
+- **P1 — `audience` was hardcoded.** Every coach was saved as "Youth athletes &
+  their parents" while the AI read the field four times and treated it as fact.
+  A coach training adult fighters or college athletes was silently mislabelled
+  and every hook and CTA aimed at the wrong people. Onboarding now ASKS, on the
+  screen that already covers mission: five options plus free text, **nothing
+  pre-selected**, and Continue is disabled until they answer. A default here
+  would be a confident lie the AI cannot tell apart from a real answer.
+- **P3 — re-running onboarding always destroyed the Instagram scan.** The save
+  set `ig_profile: null` unconditionally; the comment claimed "new handle" but
+  the code never compared. Fixing a typo in your name wiped the scraped brand
+  summary the AI uses five times. The page now loads the handle already on file
+  and only clears the scan when it actually changed — omitting the key entirely
+  otherwise, since upsert only writes the columns it is given.
+
+Still open, and deliberately left for the planning conversation: pre-selected
+defaults for sport/tones/mission (P2), no route back into onboarding from the
+app (P4), the voice memo's content being discarded (P5), tones as adjectives
+rather than writing samples (P6), no "other" for sport (P7), mission never
+refreshing (P8), and nothing capturing what the content is FOR (P9).
+
 ## Phase 3 (v2) — The Data Phase ✅ COMPLETE
 
 **Result (`POST-PHASE-3-COMPARISON.md`, 2026-09-12):** flags 5 → 4 across the

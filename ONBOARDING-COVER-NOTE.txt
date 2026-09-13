@@ -1,0 +1,268 @@
+SIDELINE — ONBOARDING: COVER NOTE
+Read this first. The code snapshot follows separately.
+Written 2026-09-13.
+
+===============================================================================
+WHY I'M ASKING
+===============================================================================
+
+I want to talk about how onboarding can collect BETTER DATA FOR THE AI.
+
+Not shorter. Not longer. Better.
+
+Onboarding is the very first thing a coach does, and everything they type
+becomes the AI's entire understanding of who they are. If we get a strong
+signal at the start, every reel the AI ever makes for that coach starts from a
+better place. If the signal is thin or generic, the AI is guessing from day one
+and no amount of later learning fully recovers it.
+
+I'm not saying the current onboarding is bad. I want to know whether there's a
+smarter way to do it — better questions, a different shape, something we
+haven't thought of. Tell me if you'd do it differently, and tell me if you'd
+leave it alone.
+
+===============================================================================
+WHAT SIDELINE IS  (30 seconds)
+===============================================================================
+
+An AI marketing employee for sports coaches. A coach uploads raw training
+footage from their phone. The AI cuts it into finished vertical reels with
+burned-in captions in their brand colour and writes the hook, caption, hashtags
+and call-to-action. They swipe to approve or skip, can send a reel back with a
+plain-English note, then download and post manually.
+
+I'm the founder — a former coach, not a programmer. Claude Code writes the
+code; I direct it and judge the output on my phone. Right now I'm the only
+coach using it, which matters: everything below is tested on one person.
+
+The pipeline: ingest → DIRECTOR (plans what pieces to make) → transcribe →
+understand (finds moments) → compose (picks cuts, writes copy) → render.
+
+===============================================================================
+THE CURRENT ONBOARDING, STEP BY STEP
+===============================================================================
+
+Six screens, mobile-first. A signed-in user with no coach profile is sent here
+automatically and can't reach the app until it's done.
+
+  0. WELCOME — just a start button.
+
+  1. INSTAGRAM HANDLE — optional. Followed by a deliberate "studying your page"
+     pause. The handle is stored; a background job later scrapes the profile
+     into a text summary of their existing brand.
+
+  2. COACH DNA CARD — the main screen. Four things:
+       • Name (free text)
+       • Sport — ONE of: Speed & agility / Strength / Soccer / Basketball /
+         Combat sports
+       • Tones — any of: Direct / Encouraging / No-nonsense / Funny / Technical
+       • Brand colour — one of four presets (Signal Red, Court Blue, Turf
+         Green, Heat Orange)
+
+  3. VOICE MEMO — up to 60 seconds, dark full-screen. They're shown one prompt:
+       "What do most coaches get wrong about training young athletes?"
+     and told: "Your employee copies how you sound — your rhythm and word
+     choice — never what you say here."
+     Recorded in the browser, sent to /api/transcribe (Deepgram), stored as
+     text. Optional — they can skip it.
+
+  4. MISSION — ONE of: More private clients / Fill the fall program / Build the
+     brand / Sell online coaching. There's also a free-text box to write their
+     own instead.
+
+  5. CITY — free text. Told it "shapes location hashtags and audience tuning."
+
+Then it saves and drops them into the app.
+
+Two notes on how it's built: it's an UPSERT, so re-running onboarding updates
+an existing profile rather than creating a duplicate. And changing the
+Instagram handle deliberately wipes the stored profile summary so it gets
+re-scanned.
+
+===============================================================================
+WHERE EACH FIELD ACTUALLY ENDS UP  (this is the important part)
+===============================================================================
+
+Onboarding is not a signup form. It IS the AI's model of the coach. Here is
+exactly how many times each field is read by the AI worker, and where:
+
+  sport                  5 uses   director + composer ("sport / focus: ...")
+  mission                5 uses   director + composer ("mission right now: ...")
+  ig_profile             5 uses   director + composer ("their Instagram brand: ...")
+                                  — NOT typed by the coach; scraped from the handle
+  voice_memo_transcript  4 uses   composer, as a STYLE sample
+  audience               4 uses   director + composer ("audience: ...")
+  name                   3 uses   composer
+  tones                  2 uses   composer ("tones=Direct, Technical")
+  accent_hex             2 uses   the render stage — burns the caption colour
+  city                   1 use    director ("city: ...")
+  ig_handle              2 uses   triggers the Instagram scan
+
+The director sees this block before planning anything:
+
+    THE COACH:
+    - sport / focus: Speed & agility
+    - audience: Youth athletes & their parents
+    - mission right now: More private clients
+    - city: Atlanta
+    - their Instagram brand: <scraped summary>
+
+And the composer, which writes every hook and caption, gets:
+
+    Coach: name=Jack; sport=Speed & agility; tones=Direct, Technical;
+    audience=Youth athletes & their parents; mission=More private clients.
+    VOICE SAMPLE — copy STYLE only (tone, rhythm, word length), NEVER its
+    topic or examples: "<the 60-second transcript>"
+    Their real Instagram vibe: <scraped summary>
+
+So a coach who picks generic chips gets generic reels. There is no other source
+of truth about who they are.
+
+===============================================================================
+PROBLEMS FOUND — ordered by what they cost the AI
+===============================================================================
+
+These came out of reading the code line by line. I want a plan to fix them, and
+I want to know which ones you think actually matter.
+
+--- SEVERE: the AI is being told things that are not true -------------------
+
+P1. AUDIENCE IS NEVER ASKED. IT IS HARDCODED.
+    Every coach is saved as "Youth athletes & their parents". One line:
+        audience: "Youth athletes & their parents",
+    The AI reads it FOUR times and treats it as fact. A coach training adult
+    fighters, college athletes or general-population clients is silently
+    mislabelled, and every hook and CTA is aimed at people who aren't their
+    customers. For me it happens to be true, which is why nothing looks broken.
+    COST: wrong audience on every piece of copy, forever, invisibly.
+
+P2. EVERY CHOICE IS PRE-SELECTED, SO TAPPING THROUGH PRODUCES CONFIDENT
+    NONSENSE.
+    The defaults are:
+        sport   = "Speed & agility"
+        tones   = ["Direct", "Encouraging"]
+        mission = "More private clients"
+        colour  = Signal Red
+    A coach who taps Continue without changing anything is saved as a Direct,
+    Encouraging Speed & Agility coach chasing private clients — whether or not
+    a word of that is true. Only NAME is actually required.
+    This is worse than leaving fields blank. A blank field reaches the AI as
+    "sport / focus: ?" and it knows it doesn't know. A default reaches it as a
+    fact and it reasons confidently from a lie.
+    COST: the laziest possible path through onboarding produces data the AI
+    cannot tell apart from a real answer.
+
+--- REAL BUGS ---------------------------------------------------------------
+
+P3. RE-RUNNING ONBOARDING WIPES THE INSTAGRAM SCAN, ALWAYS.
+    The save does this unconditionally:
+        ig_profile: null, // new handle → fresh scan on the next session
+    The comment says "new handle", but the code doesn't check whether the
+    handle changed. Fix a typo in your name and you lose the scraped summary of
+    your Instagram brand — which the AI uses FIVE times — until a background
+    job re-scrapes it.
+    COST: a correct, expensive piece of profile data destroyed by an unrelated
+    edit.
+
+P4. THERE IS NO WAY BACK INTO ONBOARDING FROM THE APP.
+    Nothing links to /onboarding. The only automatic redirect fires when a
+    coach has no profile at all. To change your sport, your tones, your mission
+    or re-record your voice memo, you have to know to type the URL. I hit this
+    myself and had to ask how to get back in.
+    COST: the profile is effectively write-once. Everything below about
+    keeping it current is impossible in practice.
+
+--- THIN SIGNAL: what we collect isn't as useful as it could be -------------
+
+P5. THE VOICE MEMO'S CONTENT IS THROWN AWAY.
+    We record 60 seconds of a coach answering "What do most coaches get wrong
+    about training young athletes?" — then the composer prompt says:
+        "copy STYLE only (tone, rhythm, word length), NEVER its topic or
+         examples"
+    So we keep the rhythm and discard the philosophy. It's the single richest
+    thing a coach gives us and we use the least valuable half of it.
+
+P6. TONES ARE ADJECTIVES, NOT EXAMPLES.
+    "Direct, Technical" is a much weaker signal than one caption the coach
+    actually wrote themselves. Five preset words are doing the work that a real
+    sample of their writing would do far better.
+
+P7. SPORT IS FIVE FIXED OPTIONS WITH NO ESCAPE HATCH.
+    Speed & agility / Strength / Soccer / Basketball / Combat sports. No
+    "other", no free text. A volleyball, swimming or track coach must pick
+    something wrong, and the AI believes it.
+
+P8. MISSION IS A SNAPSHOT THAT NEVER UPDATES.
+    "Fill the fall program" is true in August and meaningless in January.
+    Nothing ever asks again — and per P4, they can't easily change it anyway.
+
+P9. NOTHING CAPTURES WHAT THE CONTENT IS FOR.
+    We know their mission in four preset words. We don't know who they're
+    actually trying to reach, what they sell, what a win looks like, or — maybe
+    most useful of all — what they would NEVER post.
+
+===============================================================================
+===============================================================================
+WHAT HAPPENS AFTER ONBOARDING  (so you know what's already covered)
+===============================================================================
+
+We just finished a phase that makes the AI learn from behaviour, so onboarding
+does NOT have to carry everything forever:
+
+  - Every rejected reel records a reason + the coach's own words on what would
+    have made it better
+  - Every "send it back to the editor" note is stored verbatim
+  - All of that is injected into the director's brief on later sessions
+  - After each session the AI writes itself a note about what it learned
+
+That system demonstrably works. One coach note — "the same clip played twice" —
+changed the next session's shot lengths from 2.0s to 5.5s minimum.
+
+So the honest framing is: ONBOARDING ONLY HAS TO GET THEM TO A GOOD FIRST
+SESSION. The learning loop handles the rest. The question is what "good enough
+to start" really needs, and whether we're collecting the right things for it.
+
+===============================================================================
+CONSTRAINTS
+===============================================================================
+
+- Mobile-first. Coaches do this on a phone, one-handed, probably at a gym.
+- Every screen should remove a decision, not add one. That's the product's
+  north-star rule.
+- I'm not a programmer. Anything you suggest gets built by Claude Code.
+- One coach so far (me). Any claim about "what coaches want" is a guess,
+  including mine.
+- Anything collected must actually reach the AI or it's dead weight — see the
+  audience field, which is collected from nobody and used four times.
+
+===============================================================================
+WHAT I'M ASKING YOU
+===============================================================================
+
+1. IF YOU WERE DESIGNING THIS FROM SCRATCH, what would you ask a coach to get
+   the strongest possible starting signal? Don't anchor on what's there now.
+
+2. WHICH OF P1-P9 ACTUALLY MATTER? I've ordered them by my guess at cost.
+   Tell me if I've got the order wrong, and if any of them aren't worth
+   fixing at all.
+
+3. WHAT'S THE HIGHEST-VALUE THING WE'RE NOT ASKING? If you could add exactly
+   one question, what would it be and why?
+
+4. THE VOICE MEMO — are we wasting it? We record 60 seconds of a coach talking
+   and deliberately keep only the style. Should the content be used too, and
+   what would change if it were?
+
+5. ARE CHIPS THE RIGHT FORMAT? Fixed options are fast and give clean data.
+   Free text is richer but messier and harder on a phone. Where's the line?
+
+6. IS THERE A BETTER SHAPE ENTIRELY? Everything happens once, up front, before
+   they've seen a single reel. Would some of it be better asked later — after
+   their first session, when they actually understand what the app does?
+
+7. WHAT WOULD YOU NOT CHANGE? If something here is already right, say so. I'd
+   rather keep a good thing than churn it.
+
+Please be direct. If an idea of mine is wrong, say it's wrong and show me why.
+I'd much rather hear that than be agreed with and find out three sessions
+later — that exact pattern cost this project a month earlier in September.
