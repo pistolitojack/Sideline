@@ -5,10 +5,49 @@
 // failed state in the app.
 
 import { db } from "./supabase.js";
-import { STAGES } from "./stages.js";
+import { STAGES, cleanup } from "./stages.js";
 
 const POLL_MS = Number(process.env.POLL_INTERVAL_MS || 5000);
 const MAX_ATTEMPTS = 2;
+
+// ——— housekeeping ———
+//
+// cleanup() deletes files nothing needs. It existed, was registered as a stage,
+// and nothing ever queued it, so it had NEVER RUN: by 2026-10-02, 58% of the
+// storage bucket was garbage the function had always been written to collect.
+//
+// It is driven from here rather than the job table on purpose. Every job carries
+// a session, and runJob() marks that session `processing` on the way in and
+// `failed` after two throws. A cleanup job would therefore have bounced a
+// finished session back to "processing", and a storage hiccup would have told
+// the coach their session FAILED — over housekeeping that has nothing to do with
+// their reels.
+//
+// So it runs only when the worker is IDLE, never while a coach is waiting, and
+// a failure is logged and forgotten.
+const CLEANUP_EVERY_MS = Number(
+  process.env.CLEANUP_INTERVAL_MS || 6 * 60 * 60 * 1000,
+);
+// A short delay after boot rather than immediately: a redeploy mid-session
+// should not have the new worker start deleting while the old one is finishing.
+const CLEANUP_FIRST_RUN_MS = Number(
+  process.env.CLEANUP_FIRST_RUN_MS || 5 * 60 * 1000,
+);
+let nextCleanupAt = Date.now() + CLEANUP_FIRST_RUN_MS;
+
+async function maybeCleanup() {
+  if (Date.now() < nextCleanupAt) return;
+  // Booked BEFORE the attempt, so a cleanup that throws every time waits its
+  // full interval instead of retrying on every poll.
+  nextCleanupAt = Date.now() + CLEANUP_EVERY_MS;
+  try {
+    await cleanup();
+  } catch (err) {
+    // Never fatal. Storage housekeeping failing is not a reason to stop making
+    // reels, and the next run will find the same files still there.
+    console.error(`cleanup failed (will retry later): ${err.message}`);
+  }
+}
 
 async function claimJob() {
   const { data: candidates, error } = await db
@@ -115,6 +154,9 @@ async function loop() {
         }
         continue; // check immediately for the next stage
       }
+      // Nothing to do for any coach right now — a safe moment to take out the
+      // bins. Only reached when claimJob() found no pending work.
+      await maybeCleanup();
     } catch (err) {
       console.error("loop error:", err.message);
     }

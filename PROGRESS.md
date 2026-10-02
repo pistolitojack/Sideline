@@ -1,5 +1,62 @@
 # Sideline — Build Progress
 
+## Housekeeping item 2a — make cleanup actually run (2026-10-02) ✅
+
+**What the dry run found.** 2,266 MB in the bucket, of which **1,091 MB (48%)
+was orphaned reels and posters** and **221 MB (10%) was wav/transcript
+leftovers**. Both categories already had collectors written inside `cleanup()`.
+
+**Root cause: `cleanup()` had never run.** It was complete, registered in
+`STAGES`, and nothing — not the worker, not the app, not a cron — ever queued a
+cleanup job. Unreachable code, so 58% of storage was garbage it was written to
+collect. The retention windows originally planned for this item would have freed
+13.7 MB, or 0.6%, which is why the order was switched.
+
+**Where the orphans came from:** the reset SQL that trimmed 73 pieces down to
+ten (`media_assets` is keyed to the session, not the piece, so every deleted
+piece left its mp4 and poster behind), every revision superseding a render, and
+the app's "remove" action. None of it would have mattered if cleanup ran.
+
+**Two latent bugs found and fixed before it ran for the first time:**
+
+1. *Unchecked reads.* The old code destructured `{ data: pieces }` and ignored
+   the error. On any failed read — a timeout, a dropped connection — `pieces`
+   came back undefined, `pieces ?? []` became empty, nothing looked referenced,
+   and **every reel in the account became an orphan**. Demonstrated against the
+   real planner: a failed pieces read deletes 97 of 97 live reels. Reads now
+   throw; a cleanup that cannot read does not delete.
+2. *Unpaginated reads.* PostgREST caps rows per request. A truncated piece list
+   is not a smaller cleanup, it is a wrong one — unseen pieces look
+   unreferenced. All four reads are now paged to exhaustion.
+
+**Design:** the deletion decision moved into `worker/src/retention.js`, pure and
+I/O-free, so it can be tested without a live Supabase and real reels (20 tests,
+most asserting that nothing is deleted). `cleanup()` keeps the I/O and does no
+thinking.
+
+**Trigger:** the worker's idle loop, NOT the job table. A job carries a session,
+and `runJob()` marks it `processing` on entry and `failed` after two throws — so
+a cleanup job would have bounced a finished session back to "processing", and a
+storage hiccup would have told the coach their session FAILED over housekeeping.
+It now runs 5 minutes after boot and every 6 hours, only when no job is pending,
+and a failure is logged and forgotten. Tunable via `CLEANUP_INTERVAL_MS` and
+`CLEANUP_FIRST_RUN_MS`.
+
+**`CLEANUP_DRY_RUN=true`** logs exactly what would go and deletes nothing — the
+intended first run on real data, given the function had never executed and was
+about to remove a gigabyte.
+
+**Also:** `artifactPath` moved to retention.js and is now shared with ingest.
+Two copies of the same path rule is how cleanup ends up deleting nothing while
+reporting success.
+
+**Not done here (2b):** the skipped-at-5-days and approved-at-180-days tiers,
+and the "cleared to save space" state in Today that the approved tier needs.
+
+**Real file sizes, replacing the business brief's guesses:** finished reel
+11.94 MB (guessed ~10), raw clip 20.95 MB (guessed ~40 — overstated 2x), poster
+0.07 MB.
+
 ## Housekeeping item 1 — automatic prompt versions (2026-10-02) ✅
 
 **The problem.** Prompt versions were typed by hand in a `PROMPT_VERSIONS` map.
@@ -35,7 +92,12 @@ pieces after have a fingerprint and no version, which makes the changeover
 visible in the data instead of hidden inside it.
 
 Fingerprints at the time of writing: director `77e94e69`, compose `7b6b96c1`,
-revise `9c7278fe`, reflect `124601b8`.
+revise `9c7278fe`, reflect `d029d07b`.
+
+(An earlier draft of this entry recorded reflect as `124601b8`. That was measured
+before the fallback retry was added inside `reflect()`, and adding it moved the
+hash — which is the documented behaviour working correctly, and a good
+demonstration of why the number should never be typed by hand.)
 
 **Verified:** 15 new tests (69 across the worker). On the real code, a one-word
 edit to the composer's instructions moved compose from `7b6b96c1` to `625e2871`,

@@ -70,3 +70,24 @@ Good ideas that are NOT in SPEC.md for V1. Logged here instead of built.
   another coach signs up it is behavioural tracking without notice — it belongs
   in the privacy policy, and arguably deserves a line in onboarding. Cheap to
   do, awkward to retrofit after launch.
+
+## Stale media_assets rows after a purge (noticed 2026-10-02)
+
+When cleanup deletes a raw video or an intermediate, the storage file goes but
+the `media_assets` row stays. That is deliberate — `moments` and each piece's edl
+reference raw asset ids, so dropping the rows would break the admin view and the
+learning history. The cost is that cleanup re-issues the same remove calls on
+every run, and the dry run's "rows whose file is already gone" count grows
+forever (43 at the time of writing).
+
+Harmless today. A proper fix would be a `purged_at` column on media_assets so
+cleanup can skip what it already removed, which would also make the dry run's
+sanity check meaningful again rather than a slowly rising number.
+
+## 43 files vanished outside the code path (noticed 2026-10-02)
+
+The dry run found 43 media_assets rows whose storage file no longer exists. Since
+`cleanup()` had never run, something else removed them — a manual clear in the
+Supabase dashboard, failed uploads that wrote the row before the file landed, or
+the free-tier-to-Pro move. Worth one query to identify if it ever matters; no
+impact today because nothing but the dry run reads those rows.

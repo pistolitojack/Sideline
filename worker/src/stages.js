@@ -23,6 +23,12 @@ import { askClaude, imageBlock, extractJson } from "./claude.js";
 import { scorePiece } from "./scorecard.js";
 import { coachMemory } from "./memory.js";
 import { fingerprintAll } from "./fingerprint.js";
+import {
+  planCleanup,
+  chunks,
+  artifactPath,
+  RAW_RETENTION_DAYS,
+} from "./retention.js";
 
 const MOMENT_TYPES = [
   "teaching",
@@ -33,10 +39,9 @@ const MOMENT_TYPES = [
   "technique",
 ];
 
-const artifactPath = (asset, name) => {
-  const dir = asset.storage_path.split("/").slice(0, 2).join("/");
-  return `${dir}/artifacts/${asset.id}.${name}`;
-};
+// artifactPath now lives in retention.js and is imported above. ingest writes
+// these files and cleanup deletes them, so the two must agree on the path — and
+// two copies of the same rule is how they stop agreeing.
 
 async function withTmp(fn) {
   const dir = await mkdtemp(join(tmpdir(), "sideline-"));
@@ -1576,87 +1581,124 @@ export async function revise({ session }) {
 }
 
 /* ——— Cleanup: free storage from artifacts and orphaned renders ——— */
+// Read an ENTIRE table, in pages, or throw.
+//
+// Both halves of that matter, and the old code got both wrong.
+//
+// PAGING: PostgREST caps how many rows one request returns. A truncated read
+// here is not a smaller cleanup, it is a WRONG one — pieces we failed to see
+// look unreferenced, so their reels become "orphans" and get deleted.
+//
+// THROWING: the old code destructured `{ data }` and ignored the error. If the
+// pieces query failed for any reason — a timeout, a dropped connection — `data`
+// came back undefined, `pieces ?? []` became an empty list, NOTHING looked
+// referenced, and every reel in the account was an orphan. One transient
+// network error could have deleted every finished reel Sideline had ever made.
+// A cleanup that cannot read is a cleanup that must not delete.
+async function readAll(table, columns, narrow) {
+  const PAGE = 1000;
+  const rows = [];
+  for (let from = 0; ; from += PAGE) {
+    let q = db
+      .from(table)
+      .select(columns)
+      .order("id", { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (narrow) q = narrow(q);
+    const { data, error } = await q;
+    if (error) throw new Error(`read ${table}: ${error.message}`);
+    rows.push(...(data ?? []));
+    if (!data || data.length < PAGE) return rows;
+  }
+}
+
+// Delete files nothing needs any more.
+//
+// Never scheduled until 2026-10-02 — it was complete, registered as a stage,
+// and unreachable, so 58% of the bucket was garbage it had always been meant to
+// collect. Now driven by the worker's idle loop (see index.js) rather than the
+// job chain, deliberately: a job carries a session, and a cleanup failure
+// routed through the job runner would have marked a coach's session FAILED over
+// a housekeeping error.
+//
+// Set CLEANUP_DRY_RUN=true to log exactly what would go without removing
+// anything.
 export async function cleanup() {
-  const chunks = (arr, n) =>
-    Array.from({ length: Math.ceil(arr.length / n) }, (_, i) =>
-      arr.slice(i * n, i * n + n),
-    );
+  const dryRun = /^(1|true|yes)$/i.test(process.env.CLEANUP_DRY_RUN ?? "");
+
+  // Every read is complete-or-throw. Nothing is deleted on partial knowledge.
+  const [renderAssets, pieces, rawAssets, sessions] = await Promise.all([
+    readAll("media_assets", "id, storage_path", (q) => q.eq("kind", "render")),
+    readAll("content_pieces", "id, render_asset_id, edl"),
+    readAll("media_assets", "id, storage_path, session_id", (q) =>
+      q.eq("kind", "raw"),
+    ),
+    readAll("sessions", "id, status, created_at"),
+  ]);
+
+  const plan = planCleanup({
+    renderAssets,
+    pieces,
+    rawAssets,
+    sessions,
+    now: Date.now(),
+  });
+
+  // A reel is unrecoverable once removed, so say what is about to happen and
+  // on what evidence. If the piece count ever looks wrong in these logs, the
+  // orphan count in the same line cannot be trusted either.
+  console.log(
+    `cleanup${dryRun ? " (DRY RUN)" : ""} — read ${pieces.length} pieces, ` +
+      `${renderAssets.length} renders, ${rawAssets.length} raw, ` +
+      `${sessions.length} sessions`,
+  );
+  console.log(
+    `  to remove: ${plan.orphanPaths.length} orphaned renders/posters, ` +
+      `${plan.artifactPaths.length} intermediates, ` +
+      `${plan.rawPaths.length} raw videos past ${RAW_RETENTION_DAYS} days`,
+  );
+
+  if (dryRun) {
+    for (const p of plan.orphanPaths.slice(0, 10))
+      console.log(`    would delete orphan: ${p}`);
+    if (plan.orphanPaths.length > 10)
+      console.log(`    …and ${plan.orphanPaths.length - 10} more orphans`);
+    console.log("cleanup dry run complete — nothing was deleted");
+    return null;
+  }
+
   let removed = 0;
 
-  // Orphaned render files: assets no piece references anymore (old
-  // re-renders, deleted reels).
-  const { data: renders } = await db
-    .from("media_assets")
-    .select("id, storage_path")
-    .eq("kind", "render");
-  const { data: pieces } = await db
-    .from("content_pieces")
-    .select("render_asset_id, edl");
-  const referenced = new Set();
-  for (const p of pieces ?? []) {
-    if (p.render_asset_id) referenced.add(p.render_asset_id);
-    if (p.edl?.poster_asset_id) referenced.add(p.edl.poster_asset_id);
-  }
-  const orphans = (renders ?? []).filter((r) => !referenced.has(r.id));
-  for (const batch of chunks(orphans, 100)) {
-    await db.storage.from("raw").remove(batch.map((o) => o.storage_path));
-    await db
+  // Orphans: the file AND its media_assets row, so the same path is not
+  // re-examined on every future run.
+  for (const batch of chunks(plan.orphans, 100)) {
+    const { error: rmErr } = await db.storage
+      .from("raw")
+      .remove(batch.map((o) => o.storage_path));
+    if (rmErr) throw new Error(`remove orphans: ${rmErr.message}`);
+    const { error: delErr } = await db
       .from("media_assets")
       .delete()
       .in(
         "id",
         batch.map((o) => o.id),
       );
+    if (delErr) throw new Error(`delete orphan rows: ${delErr.message}`);
     removed += batch.length;
   }
 
-  // Intermediate artifacts (wav + transcript) of finished sessions.
-  const { data: done } = await db
-    .from("sessions")
-    .select("id")
-    .in("status", ["ready", "failed"]);
-  const doneIds = (done ?? []).map((s) => s.id);
-  if (doneIds.length) {
-    const { data: raws } = await db
-      .from("media_assets")
-      .select("id, storage_path")
-      .eq("kind", "raw")
-      .in("session_id", doneIds);
-    const paths = (raws ?? []).flatMap((a) => [
-      artifactPath(a, "wav"),
-      artifactPath(a, "transcript.json"),
-    ]);
-    for (const batch of chunks(paths, 100)) {
-      await db.storage.from("raw").remove(batch);
-      removed += batch.length;
-    }
+  // Intermediates and aged-out raw videos. Their media_assets rows are left in
+  // place: `moments` and each piece's edl reference raw asset ids, and dropping
+  // the rows would break the admin view and the learning history. The cost is
+  // that these paths are re-issued on later runs — harmless, and the reason the
+  // dry run reports "rows whose file is already gone".
+  for (const batch of chunks([...plan.artifactPaths, ...plan.rawPaths], 100)) {
+    const { error } = await db.storage.from("raw").remove(batch);
+    if (error) throw new Error(`remove files: ${error.message}`);
+    removed += batch.length;
   }
 
-  // Original raw videos of OLD finished sessions — the biggest storage hog.
-  // Kept 30 days so revisions (which need the source footage) work for a
-  // month; after that the source is purged. The finished reels (renders +
-  // posters) are separate files and are left untouched.
-  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  const { data: oldDone } = await db
-    .from("sessions")
-    .select("id")
-    .in("status", ["ready", "failed"])
-    .lt("created_at", cutoff);
-  const oldIds = (oldDone ?? []).map((s) => s.id);
-  if (oldIds.length) {
-    const { data: rawVids } = await db
-      .from("media_assets")
-      .select("storage_path")
-      .eq("kind", "raw")
-      .in("session_id", oldIds);
-    const vidPaths = (rawVids ?? []).map((a) => a.storage_path);
-    for (const batch of chunks(vidPaths, 100)) {
-      await db.storage.from("raw").remove(batch);
-      removed += batch.length;
-    }
-  }
-
-  console.log(`cleanup done — removed up to ${removed} files`);
+  console.log(`cleanup done — removed ${removed} files`);
   return null;
 }
 
@@ -1807,6 +1849,7 @@ export async function reflect({ session }) {
   // The fingerprint is a measurement; the lesson is the point. If that column
   // is missing, save the lesson without it rather than losing both.
   if (error) {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- omit idiom
     const { reflect_prompt_fp, ...withoutFp } = note;
     ({ error } = await db.from("coach_reflections").insert(withoutFp));
     if (!error)
