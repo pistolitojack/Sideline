@@ -1,0 +1,235 @@
+SIDELINE — WHAT IT DOES, WHAT IT COSTS TO RUN
+A briefing for business questions: is there a business here, and what should I
+charge? Written 2026-10-02.
+
+I'm the founder — a former coach, not a programmer. Claude Code writes the
+code; I direct it and judge the output. The product works and I use it on real
+footage. It has never been sold to anyone, and there is no payment system in it.
+
+Everything below is fact or clearly-labelled estimate. Where I don't know a
+number I've said so rather than guessed, and marked it [CONFIRM] so you know
+not to build on it.
+
+===============================================================================
+PART 1 — WHAT THE APP ACTUALLY DOES
+===============================================================================
+
+THE ONE-LINE VERSION
+A coach films training on their phone, uploads the raw clips, and gets back
+finished social-media reels — cut, captioned, and written — without touching an
+editing app.
+
+THE FULL LOOP, AS A COACH EXPERIENCES IT
+
+1. SIGN UP + ONBOARDING (once, ~2 minutes, on a phone)
+   Email sign-in (a code, no password). Then six screens that build what we call
+   the Coach DNA:
+     - Instagram handle (optional) — a background job later scrapes the profile
+       into a text summary of their existing brand
+     - Name, the sport they coach, the tones they want (Direct / Encouraging /
+       No-nonsense / Funny / Technical), and a brand colour
+     - A 60-second voice memo, transcribed, used so the writing sounds like them
+     - Who their content is for, and what the business goal is right now
+       (more private clients / fill the fall program / build the brand / sell
+       online coaching)
+     - Their city
+
+2. UPLOAD (30 seconds of the coach's time)
+   Pick up to 6 videos from the camera roll. Optionally tap a starting point
+   ("Hype reel", "Teaching breakdown", "Motivational story",
+   "Behind-the-scenes", "Client win") which fills an editable text box, or type
+   a request in plain English, or send nothing at all and let the AI decide.
+   Then they put the phone away.
+
+3. THE AI DOES THE WORK (3-8 minutes, unattended)
+   Six stages run on a background worker:
+     - INGEST: reads each video's length and dimensions, extracts the audio
+     - DIRECTOR: looks at sampled frames from every clip plus the coach's
+       profile, their history, and their request — then writes a plan: which
+       clips group together, what pieces to make, what each one is for, and a
+       shot-by-shot recipe for each
+     - TRANSCRIBE: speech to text (Deepgram)
+     - UNDERSTAND: per clip, looks at frames + transcript and finds the usable
+       "moments" with timestamps and a reason each one matters
+     - COMPOSE: per piece, picks the exact in/out points from those moments,
+       and writes the hook, caption, hashtags, call-to-action and the on-screen
+       caption beats
+     - RENDER: ffmpeg cuts the segments, applies transitions, crops to vertical
+       9:16, burns the captions in the coach's brand colour, normalises audio,
+       and produces an mp4 plus a poster frame
+
+4. REVIEW (1-2 minutes)
+   Finished reels appear as a swipe deck. Swipe right to keep, left to reject.
+   Rejecting asks why (Weak hook / Wrong energy / Boring cut / Off-brand /
+   Athlete issue) plus an optional note. Tapping a reel opens the detail, where
+   they can ASK FOR CHANGES in plain English — "let the jump finish before you
+   cut" — and the AI re-cuts it and sends it back.
+
+5. DOWNLOAD AND POST (manual)
+   Approved reels go to a "Today" tab with their caption ready to copy. The
+   coach downloads the video to their camera roll and posts it themselves.
+
+WHAT MAKES IT DIFFERENT FROM A TEMPLATE TOOL
+The AI learns the individual coach. Every rejection, every typed note, every
+"ask for changes" is stored and fed back into the planning stage next time. We
+have one measured example: a coach rejected a reel with the note "the same clip
+played twice", and the next session's shortest shot went from 2.0 seconds to
+5.5 seconds — no code or rule was changed, only that sentence travelling through
+the system. After each session the AI also writes itself a note about what it
+learned about that coach.
+
+WHAT IS DELIBERATELY NOT IN IT
+  - No posting to Instagram/TikTok. The coach downloads and posts manually.
+  - No scheduling or calendar.
+  - No music or licensed audio. Reels keep the original clip audio.
+  - No team accounts, no multi-user, no client management.
+  - No analytics on how posts performed after they go out.
+  - NO PAYMENT SYSTEM AT ALL. Nothing charges anybody. There is no Stripe, no
+    subscription, no trial logic, no plan limits tied to money.
+
+CURRENT LIMITS BUILT INTO THE PRODUCT
+  - 3 upload sessions per coach per rolling 24 hours (enforced in the database)
+  - 6 videos per session, 200MB per video
+  - Reels capped at 60 seconds
+  - Raw footage deleted after 30 days; finished reels kept indefinitely
+
+HOW FINISHED IT IS, HONESTLY
+It works end to end and I use it weekly on real footage. The cutting is
+decent-to-good and improving; roughly one reel in three has something I'd fix.
+There is one user — me. Nothing has been tested with another human being, so
+every claim about what coaches want, including mine, is a guess.
+
+===============================================================================
+PART 2 — WHAT IT COSTS TO RUN
+===============================================================================
+
+--- A. VARIABLE COST: AI, PER UPLOAD SESSION -------------------------------
+
+This is the number I'm most confident in. It's calculated from the actual code
+— the real frame-sampling logic, the real token budgets — at Anthropic's
+published rate for claude-sonnet-4-6 ($3 per million input tokens, $15 per
+million output).
+
+A session sends the AI sampled still frames from each video plus text. One
+frame costs about 621 tokens.
+
+  SMALL   3 clips (7.5s, 5.5s, 17.1s), 3 reels out — a real session of mine
+          34 frames · 36k input + 11.2k output tokens  ........... $0.28
+
+  TYPICAL 3 clips x 20s, 4 reels out
+          54 frames · 51k input + 12.7k output tokens  ........... $0.34
+
+  HEAVY   6 clips x 30s, 5 reels out
+          144 frames · 113k input + 18.4k output tokens  ......... $0.62
+
+  Each "ask for changes" re-cut  ............................... +$0.05
+
+  Working figure: ~$0.35 per session, ~$0.40 including one revision.
+
+--- B. VARIABLE COST: STORAGE AND BANDWIDTH --------------------------------
+
+Estimated, not measured — the per-file sizes are reasonable assumptions
+(~40MB per 20s phone clip; ~10MB per finished reel at 1080x1920, CRF 21,
+6 Mbps cap). [CONFIRM against a real Supabase usage page.]
+
+  Per session: ~120MB raw in (deleted after 30 days), ~40MB of reels (kept)
+
+  PER COACH PER MONTH:
+     4 sessions/mo   API $1.59   storage +0.63GB   egress 0.94GB
+     8 sessions/mo   API $3.18   storage +1.25GB   egress 1.88GB
+    12 sessions/mo   API $4.76   storage +1.88GB   egress 2.81GB
+    20 sessions/mo   API $7.94   storage +3.13GB   egress 4.69GB
+
+  At 12 sessions/month, all-in variable cost per coach is about $5.06
+  ($4.76 of that is the AI; infrastructure overage is about 29 cents).
+
+  THE SHAPE THAT MATTERS: this is ~94% AI cost and ~6% infrastructure. It
+  scales almost perfectly linearly with usage, with very little fixed overhead
+  per coach. There is no meaningful economy of scale on the AI side.
+
+--- C. FIXED MONTHLY COSTS -------------------------------------------------
+
+  Supabase Pro ....................... $25/month  (confirmed — I pay this)
+  Railway (the worker) ............... [CONFIRM] — I have not checked the bill
+  Vercel (the web app) ............... [CONFIRM] — believed free tier today
+  Deepgram (transcription) ........... [CONFIRM] — pay as you go, small
+  Apify (Instagram scraping) ......... [CONFIRM] — pay as you go, small
+  Resend (sign-in emails) ............ [CONFIRM] — believed free tier today
+  Domain name ........................ $0 — don't have one yet
+                                       (currently on a vercel.app address)
+
+  CONFIRMED FIXED COST TODAY: $25/month.
+  Realistic fixed cost once Railway and a domain are real: [CONFIRM], but
+  plausibly $40-70/month before any coach pays anything.
+
+--- D. WHERE THE CEILINGS ARE ----------------------------------------------
+
+  Supabase Pro includes 100GB storage and 250GB egress. At 12 sessions per
+  coach per month that's roughly:
+      ~53 coaches on storage — AND THIS SHRINKS EVERY MONTH, because finished
+        reels are kept forever and only raw footage is purged
+      ~88 coaches on bandwidth
+  Beyond that it's $0.021/GB-month storage and $0.09/GB egress — real money but
+  not frightening.
+
+  The storage number is the one to watch. Nothing currently deletes old reels.
+  That's a design decision nobody has made yet, and it's a cost decision too.
+
+--- E. WHAT I HAVE ACTUALLY SPENT -------------------------------------------
+
+  $10 of Anthropic API credit, which has covered weeks of near-daily testing
+  and development including a lot of wasted runs. $25/month Supabase since the
+  free tier ran out. That's it. The whole thing has been built for under $100.
+
+===============================================================================
+PART 3 — THE NUMBERS A PRICING ANSWER PROBABLY NEEDS
+===============================================================================
+
+  Variable cost per coach, 12 sessions/month ........... ~$5.06
+  Variable cost per coach, 4 sessions/month ............ ~$1.75
+  Confirmed fixed cost today ........................... $25/month
+  Sessions a coach can run per day (hard limit) ........ 3
+  Coach time per session ............................... ~30 seconds to upload,
+                                                         1-2 minutes to review
+  Turnaround ........................................... 3-8 minutes
+  Reels produced per session ........................... 3-5
+  Paying customers today ............................... 0
+  Users today .......................................... 1 (me)
+
+FOR CONTEXT ON WHAT THIS REPLACES: a coach's alternatives are editing it
+themselves (realistically 30-60 minutes per reel in CapCut), hiring a freelance
+editor, or not posting at all. I don't have verified market rates for a sports
+content editor and I'd rather you tell me than have me guess.
+
+===============================================================================
+PART 4 — WHAT I'M ASKING YOU
+===============================================================================
+
+1. IS THERE A BUSINESS HERE AT ALL? Be blunt. If the honest answer is "this is
+   a great personal tool and a bad business", I want to hear that now rather
+   than after I spend six months on it.
+
+2. WHAT SHOULD I CHARGE, AND HOW SHOULD IT BE STRUCTURED? Flat monthly?
+   Per-session credits? Tiers? The cost is almost entirely variable and
+   almost entirely AI, which I assume changes the answer compared to normal
+   software.
+
+3. WHAT'S THE RISK IN MY COST SHAPE? ~94% of my variable cost is the AI, and it
+   scales linearly per session. A heavy user costs me 4x what a light one does.
+   How do I price so a power user doesn't become unprofitable?
+
+4. WHAT'S THE SINGLE BIGGEST THING MISSING BEFORE ANYONE COULD PAY ME? My
+   guess is the payment system itself, but it might be something about the
+   product I'm not seeing.
+
+5. WHO IS THIS ACTUALLY FOR? I built it for private sports coaches and small
+   training facilities. Is that the right market, or is the real customer
+   someone else — gyms, agencies, other kinds of small business with the same
+   problem?
+
+6. WHAT WOULD YOU VALIDATE FIRST, AND HOW CHEAPLY? I have one user and zero
+   evidence anyone else wants this. What's the fastest honest test?
+
+Please be direct. If something I believe is wrong, say it's wrong and show me
+why. I'd rather hear it now than find out after building on it — that exact
+pattern has already cost me a month on this project once.

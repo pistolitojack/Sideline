@@ -1,5 +1,6 @@
 SIDELINE — ONBOARDING SNAPSHOT
-Generated 2026-09-13 from commit 945c914 (branch main).
+Generated 2026-09-13. Includes the two fixes made today (audience is now asked;
+the Instagram scan is no longer destroyed by an unrelated edit).
 
 Scope: the onboarding flow only — the screens a new coach sees before they can
 upload anything, the code that saves what they enter, and the shape of the
@@ -9,6 +10,7 @@ HOW ONBOARDING IS REACHED
   A signed-in user with no row in `coaches` is redirected to /onboarding by
   app/page.tsx ("if (!coachRow) redirect('/onboarding')"). proxy.ts gates
   everything except /login, /auth, /terms and /privacy behind a session.
+  NOTE: nothing in the app links back to /onboarding once a profile exists.
 
 HOW ONBOARDING SAVES
   There is NO dedicated onboarding API route. app/onboarding/page.tsx is a
@@ -54,6 +56,17 @@ const SPORTS = [
   "Combat sports",
 ];
 const TONES = ["Direct", "Encouraging", "No-nonsense", "Funny", "Technical"];
+// P1 fix: who the coach actually trains. Previously hardcoded to
+// "Youth athletes & their parents" for everyone, while the AI read it four
+// times and treated it as fact. Nothing is pre-selected — a default here is a
+// confident lie the AI cannot tell apart from a real answer.
+const AUDIENCES = [
+  "Youth athletes & their parents",
+  "High school athletes",
+  "College & pro athletes",
+  "Adult general fitness",
+  "Combat sports athletes",
+];
 const MISSIONS = [
   "More private clients",
   "Fill the fall program",
@@ -188,6 +201,8 @@ export default function OnboardingPage() {
   const [sport, setSport] = useState("Speed & agility");
   const [accent, setAccent] = useState<Accent>(ACCENTS[0]);
   const [tones, setTones] = useState<string[]>(["Direct", "Encouraging"]);
+  const [audience, setAudience] = useState("");
+  const [customAudience, setCustomAudience] = useState("");
   const [mission, setMission] = useState("More private clients");
   const [customMission, setCustomMission] = useState("");
   const [city, setCity] = useState("");
@@ -202,6 +217,11 @@ export default function OnboardingPage() {
   const chunksRef = useRef<BlobPart[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // P3 fix: the handle already on file. The save used to null out ig_profile
+  // unconditionally, so fixing a typo in your name destroyed the scraped
+  // Instagram summary the AI uses five times.
+  const savedHandle = useRef<string | null>(null);
+
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -212,6 +232,23 @@ export default function OnboardingPage() {
       if (timerRef.current) clearInterval(timerRef.current);
       recorderRef.current?.stream.getTracks().forEach((t) => t.stop());
     };
+  }, []);
+
+  // Load the handle already on file so the save can tell whether it changed.
+  useEffect(() => {
+    (async () => {
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data } = await supabase
+        .from("coaches")
+        .select("ig_handle")
+        .eq("auth_user_id", user.id)
+        .maybeSingle();
+      savedHandle.current = data?.ig_handle ?? null;
+    })();
   }, []);
 
   const startScan = () => {
@@ -296,6 +333,7 @@ export default function OnboardingPage() {
         router.push("/login");
         return;
       }
+      const newHandle = handle.trim() || null;
       // Upsert: running onboarding again UPDATES the coach's profile.
       const { error } = await supabase.from("coaches").upsert(
         {
@@ -304,12 +342,15 @@ export default function OnboardingPage() {
           sport,
           tones,
           accent_hex: accent.a,
-          audience: "Youth athletes & their parents",
+          audience: customAudience.trim() || audience,
           mission: customMission.trim() || mission,
           city: city.trim() || null,
-          ig_handle: handle.trim() || null,
+          ig_handle: newHandle,
           voice_memo_transcript: transcript || null,
-          ig_profile: null, // new handle → fresh scan on the next session
+          // Only discard the scraped Instagram summary when the handle
+          // ACTUALLY changed. Omitting the key leaves the stored value alone,
+          // because upsert only writes the columns it is given.
+          ...(newHandle !== savedHandle.current ? { ig_profile: null } : {}),
         },
         { onConflict: "auth_user_id" }
       );
@@ -745,11 +786,54 @@ export default function OnboardingPage() {
       {step === 4 && (
         <>
           <H
-            kicker={`5 of ${total} · The mission`}
-            title="What's the mission right now?"
-            sub="One goal. Every clip choice, hook, and call-to-action aims at it. Change it any time with one tap — you'll never be quizzed."
+            kicker={`5 of ${total} · Who it's for`}
+            title="Who are you making this for?"
+            sub="Your employee writes every hook and call-to-action at these people. Get this right and everything downstream aims at the right audience."
           />
           <div className="flex flex-wrap" style={{ gap: 8, marginTop: 18 }}>
+            {AUDIENCES.map((a) => (
+              <Chip
+                key={a}
+                label={a}
+                on={audience === a && !customAudience.trim()}
+                onClick={() => {
+                  setAudience(a);
+                  setCustomAudience("");
+                }}
+                ac={ac}
+              />
+            ))}
+          </div>
+          <input
+            value={customAudience}
+            onChange={(e) => setCustomAudience(e.target.value)}
+            placeholder="Or describe them yourself…"
+            style={{
+              fontSize: 14,
+              fontWeight: 600,
+              color: BASE.ink,
+              background: BASE.card,
+              border: `1.5px solid ${BASE.faint}`,
+              borderRadius: 14,
+              padding: "13px 16px",
+              width: "100%",
+              marginTop: 12,
+              outline: "none",
+            }}
+          />
+
+          <p
+            style={{
+              fontSize: 13,
+              fontWeight: 700,
+              color: BASE.ink,
+              marginTop: 22,
+              marginBottom: 7,
+            }}
+          >
+            And the mission right now?
+          </p>
+          <div className="flex flex-wrap" style={{ gap: 8 }}>
             {MISSIONS.map((m) => (
               <Chip
                 key={m}
@@ -781,7 +865,12 @@ export default function OnboardingPage() {
             }}
           />
           <div className="flex-1" />
-          <ObButton label="Continue" onClick={() => setStep(5)} ac={ac} />
+          <ObButton
+            label="Continue"
+            onClick={() => setStep(5)}
+            ac={ac}
+            disabled={!(customAudience.trim() || audience)}
+          />
         </>
       )}
 
@@ -1275,18 +1364,20 @@ THE `coaches` TABLE AS IT STANDS TODAY
   ---------------------  ------------  ----------------------------------------
   id                     uuid          no (generated)
   auth_user_id           uuid          yes (from the session)
-  name                   text          YES
-  sport                  text          YES
-  tones                  text[]        YES
-  accent_hex             text          YES (brand colour)
-  audience               text          YES
-  mission                text          YES
+  name                   text          YES — required
+  sport                  text          YES — but pre-selected to "Speed & agility"
+  tones                  text[]        YES — but pre-selected to Direct+Encouraging
+  accent_hex             text          YES — pre-selected to Signal Red
+  audience               text          YES — required, nothing pre-selected
+                                       (fixed 2026-09-13; was hardcoded before)
+  mission                text          YES — but pre-selected to "More private clients"
   ig_handle              text          YES (optional)
   voice_memo_transcript  text          YES (optional, via /api/transcribe)
   is_active              boolean       yes (flipped when onboarding completes)
   created_at             timestamptz   no (default now())
   ig_profile             text          no — written later by the worker's
-                                       Instagram scan (v4)
+                                       Instagram scan (v4). Cleared ONLY when
+                                       the handle changes (fixed 2026-09-13).
   city                   text          YES (v6)
   scanned_at             timestamptz   no — set by the worker when it scans
                                        their Instagram (v6)
