@@ -22,6 +22,7 @@ import {
 import { askClaude, imageBlock, extractJson } from "./claude.js";
 import { scorePiece } from "./scorecard.js";
 import { coachMemory } from "./memory.js";
+import { fingerprintAll } from "./fingerprint.js";
 
 const MOMENT_TYPES = [
   "teaching",
@@ -99,26 +100,32 @@ const clamp01 = (n) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
 const clampNum = (n, lo, hi, dflt) =>
   Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
 
-// Which version of each prompt is currently live.
+// Which version of each prompt built this piece — computed, not remembered.
 //
-// BUMP BY HAND when a prompt changes in a way worth measuring — a reworded
-// instruction that could change output, not a typo fix. Every piece records
-// the numbers it was made with, so a later question like "did compose v2
-// actually reduce hook_too_long?" has an answer instead of an opinion.
+// This replaces a hand-maintained PROMPT_VERSIONS map ({director: 2, compose:
+// 1, ...}). That map was only correct as long as someone remembered to bump it,
+// and the failure was silent in the worst direction available: a forgotten bump
+// does not blank the column, it stamps the OLD version onto a NEW prompt. Two
+// different prompts then share a version number, every comparison drawn from
+// them is wrong, and nothing in the data hints at it.
 //
-// All at 1 as of 2026-09-12. Reflect is already conceptually v2 (the
-// craft/preference split) but starts at 1 with the rest, since nothing was
-// stamped before today and a version only means anything going forward.
-export const PROMPT_VERSIONS = {
-  // v2 (2026-09-12): the memory block now states sample sizes and says plainly
-  // that a rejected kind is a craft problem, not a format to drop. v1 showed a
-  // bare "montage: kept 0 of 1 (0%)" and the director concluded "we're
-  // skipping montage since that format got rejected".
-  director: 2,
-  compose: 1,
-  revise: 1,
-  reflect: 1,
-};
+// Now each stage's version is an 8-character hash of the source of the function
+// that builds its prompt. Reword an instruction and the hash moves on its own;
+// change nothing and it holds steady. There is no step left to forget.
+//
+// Evaluated once at module load. Function declarations are hoisted, so naming
+// the builders here — above where they appear in the file — is fine. See
+// fingerprint.js for why we hash the builder rather than the finished prompt,
+// and for what this intentionally over-reports.
+//
+// The old integer columns still hold the hand-set version of every piece made
+// before 2026-10-02. They are left alone: history, not a running total.
+export const PROMPT_FINGERPRINTS = fingerprintAll({
+  director: direct,
+  compose: composePlannedPiece,
+  revise,
+  reflect,
+});
 
 // Everything Phase 3 added to content_pieces that is a MEASUREMENT rather
 // than the piece itself. If a migration hasn't been run, one of these columns
@@ -129,6 +136,9 @@ const TELEMETRY_FIELDS = [
   "director_prompt_version",
   "compose_prompt_version",
   "revise_prompt_version",
+  "director_prompt_fp",
+  "compose_prompt_fp",
+  "revise_prompt_fp",
 ];
 const withoutTelemetry = (row) => {
   const core = { ...row };
@@ -920,9 +930,10 @@ async function composePlannedPiece({
     suggested_slot: String(draft.suggested_slot ?? "").slice(0, 40),
     suggested_sound: String(draft.suggested_sound ?? "").slice(0, 120),
     status: "ready",
-    // Which prompts built this piece (Phase 3.8).
-    director_prompt_version: PROMPT_VERSIONS.director,
-    compose_prompt_version: PROMPT_VERSIONS.compose,
+    // Which prompts built this piece. Derived from the builders' source, so
+    // these cannot fall out of step with the prompts actually used.
+    director_prompt_fp: PROMPT_FINGERPRINTS.director,
+    compose_prompt_fp: PROMPT_FINGERPRINTS.compose,
   };
 
   let { error: insErr } = await db.from("content_pieces").insert(row);
@@ -1533,7 +1544,7 @@ export async function revise({ session }) {
         render_asset_id: null,
         revision_note: null,
         revision_history: newHistory,
-        revise_prompt_version: PROMPT_VERSIONS.revise,
+        revise_prompt_fp: PROMPT_FINGERPRINTS.revise,
       };
 
       let { error: upErr } = await db
@@ -1782,16 +1793,27 @@ export async function reflect({ session }) {
     return null;
   }
 
-  const { error } = await db.from("coach_reflections").insert({
+  const note = {
     coach_id: coach.id,
     session_id: session.id,
     craft_lesson: craft.slice(0, 1000) || null,
     preference_note: pref.slice(0, 500) || null,
     decisions_at_time: totalDecisions,
-    reflect_prompt_version: PROMPT_VERSIONS.reflect,
+    reflect_prompt_fp: PROMPT_FINGERPRINTS.reflect,
     // Kept in sync so older readers and the admin view still work.
     reflection: [craft, pref].filter(Boolean).join(" ").slice(0, 1000),
-  });
+  };
+  let { error } = await db.from("coach_reflections").insert(note);
+  // The fingerprint is a measurement; the lesson is the point. If that column
+  // is missing, save the lesson without it rather than losing both.
+  if (error) {
+    const { reflect_prompt_fp, ...withoutFp } = note;
+    ({ error } = await db.from("coach_reflections").insert(withoutFp));
+    if (!error)
+      console.warn(
+        "  reflection saved without its fingerprint — run supabase/v11-prompt-fingerprints.sql",
+      );
+  }
   if (error) {
     // Never fail a job over a learning note. The coach already has their reels.
     console.warn(`  reflection not saved (${error.message}) — run supabase/v10-reflection-split.sql`);

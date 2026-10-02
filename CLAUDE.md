@@ -41,10 +41,14 @@ whether he wants it before any work happens.
   stays EMPTY until a pattern genuinely holds across sessions. Remind Jack to
   look. If a preference note appears from thin evidence, the bar is still
   too low.
-- **When a prompt changes meaningfully, bump its number** in `PROMPT_VERSIONS`
-  (`worker/src/stages.js`). It is a manual act on purpose — bumping it means
-  "this is a real change worth measuring". Forgetting it makes the version
-  column lie, which is worse than not having it.
+- ~~**When a prompt changes meaningfully, bump its number** in
+  `PROMPT_VERSIONS`.~~ **Retired 2026-10-02.** Prompt versions are now
+  fingerprints computed from the source of each prompt-building function
+  (`worker/src/fingerprint.js`), so there is nothing to remember. The reason it
+  was retired is worth keeping: a forgotten bump did not blank the column, it
+  stamped the OLD version onto a NEW prompt. A column that lies quietly is
+  worse than no column, and anything that depends on a human remembering will
+  eventually lie.
 
 ## Hard-won rules
 

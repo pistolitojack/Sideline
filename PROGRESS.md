@@ -1,5 +1,52 @@
 # Sideline — Build Progress
 
+## Housekeeping item 1 — automatic prompt versions (2026-10-02) ✅
+
+**The problem.** Prompt versions were typed by hand in a `PROMPT_VERSIONS` map.
+That only worked while someone remembered to bump it, and the failure mode ran
+in the worst direction available: a forgotten bump did not leave the column
+blank, it stamped the OLD version onto a NEW prompt. Two different prompts then
+shared a version number, any comparison built on them was wrong, and nothing in
+the data hinted at it. A column that lies quietly is worse than no column.
+
+**The fix.** `worker/src/fingerprint.js` — a pure module that hashes the source
+text of each prompt-building function into 8 hex characters. `stages.js` now
+exports `PROMPT_FINGERPRINTS` instead of `PROMPT_VERSIONS`, computed once at
+module load from `direct`, `composePlannedPiece`, `revise` and `reflect`.
+
+Why hash the builder and not the finished prompt: an assembled prompt contains
+the session's own data — frames, coach memory, transcripts — so it differs every
+session and its hash would mean nothing. The builder's source is the recipe, and
+it changes only when we change it.
+
+What it deliberately over-reports: editing non-prompt logic inside the same
+function also moves the hash. That is the safe direction of error — such edits
+can change output too, and a hash that occasionally says "something changed"
+when the wording didn't is far better than one that sits still while the wording
+did. It can never miss a change.
+
+**Migration:** `supabase/v11-prompt-fingerprints.sql` adds four text columns
+(`director_prompt_fp`, `compose_prompt_fp`, `revise_prompt_fp` on
+`content_pieces`, `reflect_prompt_fp` on `coach_reflections`) and carries the
+comparison queries in its footer. The old integer columns are left in place
+holding the hand-set version of every piece made before today — history, not a
+running total. Pieces before the boundary have a version and no fingerprint;
+pieces after have a fingerprint and no version, which makes the changeover
+visible in the data instead of hidden inside it.
+
+Fingerprints at the time of writing: director `77e94e69`, compose `7b6b96c1`,
+revise `9c7278fe`, reflect `124601b8`.
+
+**Verified:** 15 new tests (69 across the worker). On the real code, a one-word
+edit to the composer's instructions moved compose from `7b6b96c1` to `625e2871`,
+reverting restored `7b6b96c1` exactly, and the director's hash never moved.
+Telemetry fallback extended to the new columns, and the reflect insert now
+retries without the fingerprint rather than losing the lesson.
+
+**Known gap, left alone on purpose:** the `understand` stage builds a prompt and
+has no version column at all — not a lying column, a missing one. Adding it is a
+one-line migration whenever Jack wants it.
+
 ## Onboarding fixes (2026-09-13)
 
 An audit of the onboarding flow ahead of a planning conversation turned up nine
