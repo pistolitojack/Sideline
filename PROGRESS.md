@@ -50,6 +50,27 @@ about to remove a gigabyte.
 Two copies of the same path rule is how cleanup ends up deleting nothing while
 reporting success.
 
+**A third bug, found when the first deploy logged nothing (same day).** `render()`
+inserts the media_assets row and only THEN updates the piece to point at it;
+`composePlannedPiece()` has the same gap for the poster. In that window a
+freshly made reel is indistinguishable from an orphan. One worker never trips it
+— cleanup runs only from the idle branch of its own loop — but a Railway
+redeploy briefly runs two, and an idle one would have deleted the reel the busy
+one had just made. Fixed by restricting orphan collection to sessions that are
+`ready` or `failed`: an in-flight session's assets are unreachable no matter how
+many workers exist, and cleanup's rule is now uniform (it only ever touches
+finished sessions). Unreferenced files held back this way are counted and logged
+rather than silently ignored, because a number that stays high means sessions are
+getting stuck.
+
+**Why the first deploy appeared to do nothing:** the first run was 5 minutes
+after boot and the worker said nothing about it, so "waiting" and "not deployed"
+and "never reached" all looked identical. Housekeeping that runs on a timer and
+announces nothing is exactly how `cleanup()` stayed dead for a month. The worker
+now prints its cleanup schedule at boot, which also proves a deploy picked up new
+code, and the first run moved to 60 seconds (the redeploy race it was guarding
+against is handled properly now).
+
 **Not done here (2b):** the skipped-at-5-days and approved-at-180-days tiers,
 and the "cleared to save space" state in Today that the approved tier needs.
 

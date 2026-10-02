@@ -1657,6 +1657,16 @@ export async function cleanup() {
       `${plan.artifactPaths.length} intermediates, ` +
       `${plan.rawPaths.length} raw videos past ${RAW_RETENTION_DAYS} days`,
   );
+  // Unreferenced files belonging to sessions that are not finished. Never
+  // deleted — a reel mid-render looks exactly like an orphan. Printed because a
+  // number that stays high means sessions are getting stuck, not that cleanup
+  // is being too careful.
+  if (plan.heldInFlight) {
+    console.log(
+      `  holding ${plan.heldInFlight} unreferenced file(s) — their session is ` +
+        `not finished yet`,
+    );
+  }
 
   if (dryRun) {
     for (const p of plan.orphanPaths.slice(0, 10))

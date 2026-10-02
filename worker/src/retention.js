@@ -33,14 +33,34 @@ export function artifactPath(asset, name) {
 // A piece references its video through render_asset_id and its poster from
 // inside its edl. Both count — miss the poster link and every poster in the
 // account looks unreferenced.
-function findOrphans(renderAssets, pieces) {
+//
+// THE RACE THIS GUARDS AGAINST, which is subtle and would have destroyed work:
+// render() inserts the media_assets row and only THEN updates the piece to point
+// at it. In the gap between those two statements, a freshly rendered reel is
+// indistinguishable from an orphan. The poster has the same gap in
+// composePlannedPiece(). One worker never trips this, because cleanup only runs
+// from the idle branch of its own loop — but a Railway redeploy briefly runs two
+// workers, and an idle one would happily delete the reel the busy one just made.
+//
+// So orphan collection is restricted to sessions that are FINISHED. An in-flight
+// session is `processing`, which puts every asset it is still creating out of
+// reach no matter how many workers are running. It also makes cleanup's rule
+// uniform: it only ever touches sessions that are done.
+function findOrphans(renderAssets, pieces, finishedIds) {
   const referenced = new Set();
   for (const p of pieces) {
     if (p.render_asset_id) referenced.add(p.render_asset_id);
     const poster = p.edl?.poster_asset_id;
     if (poster) referenced.add(poster);
   }
-  return renderAssets.filter((r) => !referenced.has(r.id));
+  const unreferenced = renderAssets.filter((r) => !referenced.has(r.id));
+  return {
+    orphans: unreferenced.filter((r) => finishedIds.has(r.session_id)),
+    // Reported, not deleted. If this is ever large it means sessions are
+    // getting stuck mid-pipeline, which is worth knowing on its own.
+    heldInFlight: unreferenced.filter((r) => !finishedIds.has(r.session_id))
+      .length,
+  };
 }
 
 // Decide everything cleanup will remove on this run.
@@ -55,16 +75,23 @@ export function planCleanup({
   sessions = [],
   now = Date.now(),
 } = {}) {
-  // 1. Renders and posters nothing references: old re-renders, and the files
-  //    of pieces that were deleted. Deleting a piece row does not touch its
-  //    media_assets rows, so every deleted piece leaves two files behind.
-  const orphans = findOrphans(renderAssets, pieces);
-
-  // 2. Intermediates (wav + transcript) of any finished session. These are
-  //    worthless the moment the session completes.
+  // Which sessions are done. Nothing cleanup does ever touches a session that
+  // is still working — see findOrphans for the race that makes this essential.
   const finishedIds = new Set(
     sessions.filter((s) => FINISHED.includes(s.status)).map((s) => s.id),
   );
+
+  // 1. Renders and posters nothing references: old re-renders, and the files
+  //    of pieces that were deleted. Deleting a piece row does not touch its
+  //    media_assets rows, so every deleted piece leaves two files behind.
+  const { orphans, heldInFlight } = findOrphans(
+    renderAssets,
+    pieces,
+    finishedIds,
+  );
+
+  // 2. Intermediates (wav + transcript) of any finished session. These are
+  //    worthless the moment the session completes.
   const artifactPaths = [];
   for (const a of rawAssets) {
     if (!finishedIds.has(a.session_id)) continue;
@@ -96,6 +123,7 @@ export function planCleanup({
     orphanAssetIds: orphans.map((o) => o.id),
     artifactPaths,
     rawPaths,
+    heldInFlight,
   };
 }
 

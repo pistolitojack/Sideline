@@ -28,10 +28,12 @@ const MAX_ATTEMPTS = 2;
 const CLEANUP_EVERY_MS = Number(
   process.env.CLEANUP_INTERVAL_MS || 6 * 60 * 60 * 1000,
 );
-// A short delay after boot rather than immediately: a redeploy mid-session
-// should not have the new worker start deleting while the old one is finishing.
+// A short settling delay after boot. The redeploy race it was originally
+// guarding against is now handled properly in planCleanup (an in-flight
+// session's assets are untouchable), so this only needs to be long enough to
+// stay out of the way of a worker that boots straight into a queued job.
 const CLEANUP_FIRST_RUN_MS = Number(
-  process.env.CLEANUP_FIRST_RUN_MS || 5 * 60 * 1000,
+  process.env.CLEANUP_FIRST_RUN_MS || 60 * 1000,
 );
 let nextCleanupAt = Date.now() + CLEANUP_FIRST_RUN_MS;
 
@@ -143,6 +145,17 @@ async function failJob(job, err) {
 
 async function loop() {
   console.log(`Sideline worker up — polling every ${POLL_MS}ms`);
+  // Say this out loud at boot. Housekeeping that runs on a timer is otherwise
+  // indistinguishable from housekeeping that is not running at all — which is
+  // exactly how cleanup() stayed dead for a month without anyone noticing.
+  // Seeing this line also proves the deploy picked up the new code.
+  console.log(
+    `  housekeeping: first cleanup in ${Math.round(CLEANUP_FIRST_RUN_MS / 1000)}s, ` +
+      `then every ${Math.round(CLEANUP_EVERY_MS / 3600000)}h` +
+      (/^(1|true|yes)$/i.test(process.env.CLEANUP_DRY_RUN ?? "")
+        ? " — DRY RUN, nothing will be deleted"
+        : ""),
+  );
   for (;;) {
     try {
       const job = await claimJob();
