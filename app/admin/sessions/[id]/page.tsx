@@ -173,16 +173,31 @@ export default async function AdminSessionDetail({
                     {p.revision_count ? ` · ${p.revision_count} revision${p.revision_count === 1 ? "" : "s"}` : ""}
                   </span>
                 )}
-                {(p.director_prompt_version || p.compose_prompt_version) && (
+                {/* Which prompts built this piece. Pieces made from 2026-10-02
+                    carry fingerprints (hashes derived from the prompt code);
+                    older ones carry the hand-set version numbers. Show whichever
+                    the piece actually has rather than a blank badge. */}
+                {(p.director_prompt_fp || p.compose_prompt_fp) && (
                   <span
-                    className="rounded-full border border-neutral-200 px-2 py-0.5 text-neutral-500"
-                    title="Which prompt versions built this piece (Phase 3.8)"
+                    className="rounded-full border border-neutral-200 px-2 py-0.5 font-mono text-neutral-500"
+                    title="Prompt fingerprints that built this piece — director · compose · revise"
                   >
-                    d{p.director_prompt_version ?? "?"}·c
-                    {p.compose_prompt_version ?? "?"}
-                    {p.revise_prompt_version ? `·r${p.revise_prompt_version}` : ""}
+                    d{p.director_prompt_fp ?? "?"}·c{p.compose_prompt_fp ?? "?"}
+                    {p.revise_prompt_fp ? `·r${p.revise_prompt_fp}` : ""}
                   </span>
                 )}
+                {!p.director_prompt_fp &&
+                  !p.compose_prompt_fp &&
+                  (p.director_prompt_version || p.compose_prompt_version) && (
+                    <span
+                      className="rounded-full border border-neutral-200 px-2 py-0.5 text-neutral-500"
+                      title="Hand-set prompt versions (pieces made before fingerprints)"
+                    >
+                      d{p.director_prompt_version ?? "?"}·c
+                      {p.compose_prompt_version ?? "?"}
+                      {p.revise_prompt_version ? `·r${p.revise_prompt_version}` : ""}
+                    </span>
+                  )}
                 {flags.map((f) => (
                   <span
                     key={f}
