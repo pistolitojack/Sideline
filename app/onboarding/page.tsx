@@ -9,6 +9,18 @@ import { useRouter } from "next/navigation";
 import { ACCENTS, BASE, type Accent } from "@/lib/design";
 import { createClient } from "@/lib/supabase/client";
 
+// THE RULE THIS WHOLE FILE NOW FOLLOWS: a pre-selected answer is worse than no
+// answer. A blank reaches the AI as "sport / focus: ?" and it knows it is
+// guessing. A default reaches it as a fact and it reasons confidently from a
+// lie — and nothing downstream can tell the two apart, because the coach who
+// tapped straight through and the coach who meant it look identical in the
+// database. Only the brand colour keeps a default: it is the caption colour,
+// not a claim about who the coach is.
+
+// Five sports and no escape hatch meant a volleyball, swimming or track coach
+// had to pick something false — while the AI reads sport five times as fact.
+// The "Something else" box is what makes requiring an answer fair: without it,
+// demanding one would force the lie rather than prevent it.
 const SPORTS = [
   "Speed & agility",
   "Strength",
@@ -28,11 +40,16 @@ const AUDIENCES = [
   "Adult general fitness",
   "Combat sports athletes",
 ];
+// "Not sure yet" is a real answer, not a blank. A coach who genuinely has no
+// single goal right now should be able to say so in one tap instead of picking
+// the least-wrong chip — which is the behaviour a required field would
+// otherwise produce, and exactly the fiction this screen is trying to stop.
 const MISSIONS = [
   "More private clients",
   "Fill the fall program",
   "Build the brand",
   "Sell online coaching",
+  "Not sure yet",
 ];
 const MAX_MEMO_SECONDS = 60;
 
@@ -159,12 +176,18 @@ export default function OnboardingPage() {
   const [scanning, setScanning] = useState(false);
   const [scanned, setScanned] = useState(false);
   const [name, setName] = useState("");
-  const [sport, setSport] = useState("Speed & agility");
+  const [sport, setSport] = useState("");
+  const [customSport, setCustomSport] = useState("");
+  // The colour keeps its default on purpose — it decides what the burned-in
+  // captions look like, and the AI never reasons from it.
   const [accent, setAccent] = useState<Accent>(ACCENTS[0]);
-  const [tones, setTones] = useState<string[]>(["Direct", "Encouraging"]);
+  // Optional. Tones are a style hint worth 2 uses, and if a coach records the
+  // voice memo their actual rhythm and word choice carry far more than five
+  // adjectives would. Better empty than invented.
+  const [tones, setTones] = useState<string[]>([]);
   const [audience, setAudience] = useState("");
   const [customAudience, setCustomAudience] = useState("");
-  const [mission, setMission] = useState("More private clients");
+  const [mission, setMission] = useState("");
   const [customMission, setCustomMission] = useState("");
   const [city, setCity] = useState("");
 
@@ -300,11 +323,14 @@ export default function OnboardingPage() {
         {
           auth_user_id: user.id,
           name: name.trim() || "Coach",
-          sport,
+          // NULL, never "". The prompts render a missing value as "?" so the AI
+          // knows it is guessing; an empty string would reach it as a blank
+          // after the label, which reads like an answer nobody gave.
+          sport: customSport.trim() || sport || null,
           tones,
           accent_hex: accent.a,
-          audience: customAudience.trim() || audience,
-          mission: customMission.trim() || mission,
+          audience: customAudience.trim() || audience || null,
+          mission: customMission.trim() || mission || null,
           city: city.trim() || null,
           ig_handle: newHandle,
           voice_memo_transcript: transcript || null,
@@ -666,12 +692,32 @@ export default function OnboardingPage() {
               <Chip
                 key={s}
                 label={s}
-                on={sport === s}
-                onClick={() => setSport(s)}
+                on={sport === s && !customSport.trim()}
+                onClick={() => {
+                  setSport(s);
+                  setCustomSport("");
+                }}
                 ac={ac}
               />
             ))}
           </div>
+          <input
+            value={customSport}
+            onChange={(e) => setCustomSport(e.target.value)}
+            placeholder="Something else — volleyball, swimming, track…"
+            style={{
+              fontSize: 14,
+              fontWeight: 600,
+              color: BASE.ink,
+              background: BASE.card,
+              border: `1.5px solid ${BASE.faint}`,
+              borderRadius: 14,
+              padding: "12px 16px",
+              width: "100%",
+              marginTop: 9,
+              outline: "none",
+            }}
+          />
           <p
             style={{
               fontSize: 13,
@@ -713,7 +759,10 @@ export default function OnboardingPage() {
               marginBottom: 7,
             }}
           >
-            You sound
+            You sound{" "}
+            <span style={{ fontWeight: 600, color: BASE.muted }}>
+              — optional
+            </span>
           </p>
           <div className="flex flex-wrap" style={{ gap: 7 }}>
             {TONES.map((t) => (
@@ -726,20 +775,19 @@ export default function OnboardingPage() {
               />
             ))}
           </div>
-          {scanned && (
-            <p style={{ fontSize: 12.5, color: BASE.muted, marginTop: 14 }}>
-              Audience read from your page:{" "}
-              <span style={{ fontWeight: 700, color: BASE.ink }}>
-                youth athletes &amp; their parents
-              </span>
-            </p>
-          )}
+          {/* A hardcoded line used to sit here claiming "Audience read from
+              your page: youth athletes & their parents" to anyone who entered an
+              Instagram handle. Nothing read it from their page — it was static
+              text left over from when audience was hardcoded for every coach.
+              It told the coach a fabricated fact about themselves AND primed
+              them to accept the same answer on the audience screen two steps
+              later, which quietly corrupted the one field we had just fixed. */}
           <div className="flex-1" style={{ minHeight: 16 }} />
           <ObButton
             label="That's me"
             onClick={() => setStep(3)}
             ac={ac}
-            disabled={!name.trim()}
+            disabled={!name.trim() || !(customSport.trim() || sport)}
           />
         </>
       )}
@@ -830,7 +878,10 @@ export default function OnboardingPage() {
             label="Continue"
             onClick={() => setStep(5)}
             ac={ac}
-            disabled={!(customAudience.trim() || audience)}
+            disabled={
+              !(customAudience.trim() || audience) ||
+              !(customMission.trim() || mission)
+            }
           />
         </>
       )}

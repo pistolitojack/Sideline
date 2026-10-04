@@ -518,7 +518,7 @@ export async function understand({ session }) {
         type: "text",
         text: [
           `You are analyzing raw training footage for a sports coach.`,
-          `Coach profile: sport=${coach.sport}; audience=${coach.audience}; mission=${coach.mission}.`,
+          `Coach profile: sport=${coach.sport ?? "?"}; audience=${coach.audience ?? "?"}; mission=${coach.mission ?? "?"}.`,
           (session.prompt ?? session.brief)
             ? `THE COACH'S NOTE FOR THIS SESSION (top priority, honor it): "${String(session.prompt ?? session.brief).slice(0, 500)}"`
             : ``,
@@ -752,9 +752,9 @@ async function composePlannedPiece({
 
   const prompt = [
     `You are the coach's editor + ghostwriter. Build the ONE piece the DIRECTOR asked for below.`,
-    `Coach: name=${coach.name}; sport=${coach.sport}; tones=${(
+    `Coach: name=${coach.name}; sport=${coach.sport ?? "?"}; tones=${(
       coach.tones ?? []
-    ).join(", ")}; audience=${coach.audience}; mission=${coach.mission}.`,
+    ).join(", ")}; audience=${coach.audience ?? "?"}; mission=${coach.mission ?? "?"}.`,
     coach.voice_memo_transcript
       ? `VOICE SAMPLE — copy STYLE only (tone, rhythm, word length), NEVER its topic or examples: "${coach.voice_memo_transcript.slice(
           0,
@@ -1356,9 +1356,9 @@ export async function revise({ session }) {
       content.push({
         type: "text",
         text: [
-          `Coach: ${coach.name}; sport=${coach.sport}; tones=${(
+          `Coach: ${coach.name}; sport=${coach.sport ?? "?"}; tones=${(
             coach.tones ?? []
-          ).join(", ")}; mission=${coach.mission}.`,
+          ).join(", ")}; mission=${coach.mission ?? "?"}.`,
           coach.voice_memo_transcript
             ? `Voice sample (STYLE ONLY — copy tone/rhythm, never its topic): "${coach.voice_memo_transcript.slice(
                 0,
@@ -1855,7 +1855,7 @@ export async function reflect({ session }) {
       {
         type: "text",
         text: [
-          `Coach: ${coach.name}; sport=${coach.sport}; audience=${coach.audience}; mission=${coach.mission}.`,
+          `Coach: ${coach.name}; sport=${coach.sport ?? "?"}; audience=${coach.audience ?? "?"}; mission=${coach.mission ?? "?"}.`,
           session.prompt
             ? `What they asked for this session: "${String(session.prompt).slice(0, 300)}"`
             : "They gave no request this session — the AI chose what to make.",

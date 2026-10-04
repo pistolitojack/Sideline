@@ -1,5 +1,56 @@
 # Sideline — Build Progress
 
+## Item 3 — onboarding stops lying to the AI (2026-10-04) ✅
+
+**The rule now applied throughout: a pre-selected answer is worse than no
+answer.** A blank reaches the AI as `sport / focus: ?` and it knows it is
+guessing. A default reaches it as a fact and it reasons confidently from a lie —
+and nothing downstream can tell them apart, because a coach who tapped straight
+through and a coach who meant it look identical in the database.
+
+**The worst thing found, which was not on the P1–P7 list.** The Coach DNA screen
+printed, to anyone who entered an Instagram handle:
+
+> Audience read from your page: **youth athletes & their parents**
+
+Hardcoded static text. Nothing read it from their page. It was left over from
+when `audience` was hardcoded for every coach, and it did two kinds of damage:
+told the coach a fabricated fact about themselves, and primed them to accept the
+same answer on the audience screen two steps later — quietly corrupting the one
+field that had just been fixed. Deleted.
+
+**What changed:**
+- **Sport** — nothing pre-selected, plus a "Something else" free-text box, then
+  required. P1 and P6 had to ship together: requiring an answer while offering
+  only five options would have *forced* the lie instead of preventing it.
+- **Mission** — nothing pre-selected, plus a "Not sure yet" chip. A real answer
+  in one tap, rather than a required field pushing coaches to the least-wrong
+  option, which is the same fiction in a new costume.
+- **Tones** — nothing pre-selected and genuinely optional. Worth 2 AI uses, and
+  the voice memo carries rhythm and word choice far better than five adjectives.
+- **Brand colour** — untouched. It decides the burned-in caption colour; the AI
+  never reasons from it, so a default there is not a claim about anyone.
+- **Saves `null`, not `""`.** An empty string renders as a blank after the label,
+  which reads like an answer nobody gave.
+
+**A correction to the previous plan.** It was stated that no prompt changes were
+needed, on the basis that the director renders `${coach.sport ?? "?"}`. That was
+checked in one place and generalised. Four other sites — understand, compose,
+revise, reflect — would have printed the literal word `null`. All now use the
+director's existing `?? "?"` pattern. Mechanical: no reworded instructions, no
+changed rules.
+
+**Which made item 1 prove itself on real work.** Three prompt builders changed
+and three fingerprints moved by themselves — compose `7b6b96c1`→`b4084ba4`,
+revise `9c7278fe`→`dc084722`, reflect `d029d07b`→`3e1558f2` — while the director,
+untouched, held `77e94e69`. Under the old hand-maintained map this would have
+been four numbers to remember on a day spent thinking about something else.
+
+**Still open (P2–P7):** no route back into onboarding and no pre-fill, so a
+mistake needs SQL to fix; mission is still a snapshot that never updates; the
+voice memo's content is still discarded in favour of its style. Deliberately not
+guessed at — the next run with a real first-time user should decide the order.
+
 ## Housekeeping item 2c — make the cleanup log tell the truth (2026-10-04) ✅
 
 **The problem.** Cleanup deletes a raw clip's file but keeps its `media_assets`
