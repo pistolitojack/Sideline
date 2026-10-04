@@ -11,6 +11,8 @@ import {
   artifactPath,
   chunks,
   RAW_RETENTION_DAYS,
+  SKIPPED_RETENTION_DAYS,
+  APPROVED_RETENTION_DAYS,
 } from "../src/retention.js";
 
 let passed = 0;
@@ -288,6 +290,151 @@ test("a raw asset whose session is not in the list is left alone", () => {
   });
   assert.deepEqual(plan.rawPaths, []);
   assert.deepEqual(plan.artifactPaths, []);
+});
+
+// ——— retention windows on decided reels ———
+
+const piece = (over) => ({
+  session_id: "s1",
+  render_asset_id: "vid",
+  edl: { poster_asset_id: "post" },
+  status: "skipped",
+  reviewed_at: ago(99),
+  created_at: ago(99),
+  ...over,
+});
+const ASSETS = [
+  { id: "vid", storage_path: "u/s/reel.mp4", session_id: "s1" },
+  { id: "post", storage_path: "u/s/posters/p.jpg", session_id: "s1" },
+];
+
+test("a skipped reel past 1 day loses its VIDEO", () => {
+  const plan = planCleanup({
+    renderAssets: ASSETS,
+    pieces: [piece({ status: "skipped", reviewed_at: ago(2) })],
+    sessions: READY,
+    now: NOW,
+  });
+  assert.deepEqual(plan.expiredPaths, ["u/s/reel.mp4"]);
+});
+
+test("a skipped reel KEEPS its poster", () => {
+  // 0.07MB to keep the admin view showing what was rejected, next to why.
+  const plan = planCleanup({
+    renderAssets: ASSETS,
+    pieces: [piece({ status: "skipped", reviewed_at: ago(900) })],
+    sessions: READY,
+    now: NOW,
+  });
+  assert.ok(!plan.expiredPaths.includes("u/s/posters/p.jpg"));
+  assert.equal(plan.expiredPaths.length, 1);
+});
+
+test("a skipped reel INSIDE 1 day is untouched — the mis-swipe window", () => {
+  const plan = planCleanup({
+    renderAssets: ASSETS,
+    pieces: [piece({ status: "skipped", reviewed_at: ago(0) })],
+    sessions: READY,
+    now: NOW,
+  });
+  assert.deepEqual(plan.expiredPaths, []);
+});
+
+test("an approved reel inside 60 days is untouched", () => {
+  const plan = planCleanup({
+    renderAssets: ASSETS,
+    pieces: [piece({ status: "approved", reviewed_at: ago(59) })],
+    sessions: READY,
+    now: NOW,
+  });
+  assert.deepEqual(plan.expiredPaths, []);
+});
+
+test("an approved reel past 60 days loses BOTH video and poster", () => {
+  const plan = planCleanup({
+    renderAssets: ASSETS,
+    pieces: [piece({ status: "approved", reviewed_at: ago(61) })],
+    sessions: READY,
+    now: NOW,
+  });
+  assert.deepEqual(plan.expiredPaths.sort(), [
+    "u/s/posters/p.jpg",
+    "u/s/reel.mp4",
+  ]);
+});
+
+test("a downloaded reel follows the approved window", () => {
+  const plan = planCleanup({
+    renderAssets: ASSETS,
+    pieces: [piece({ status: "downloaded", reviewed_at: ago(61) })],
+    sessions: READY,
+    now: NOW,
+  });
+  assert.equal(plan.expiredPaths.length, 2);
+});
+
+test("a reel still awaiting review NEVER expires, however old", () => {
+  // The coach has not seen it. Nothing should vanish in front of someone who
+  // never got the chance to look.
+  const plan = planCleanup({
+    renderAssets: ASSETS,
+    pieces: [piece({ status: "ready", reviewed_at: null, created_at: ago(900) })],
+    sessions: READY,
+    now: NOW,
+  });
+  assert.deepEqual(plan.expiredPaths, []);
+});
+
+test("a piece mid-render never expires", () => {
+  const plan = planCleanup({
+    renderAssets: ASSETS,
+    pieces: [piece({ status: "rendering", created_at: ago(900) })],
+    sessions: READY,
+    now: NOW,
+  });
+  assert.deepEqual(plan.expiredPaths, []);
+});
+
+test("expiry falls back to created_at when never reviewed-stamped", () => {
+  const plan = planCleanup({
+    renderAssets: ASSETS,
+    pieces: [
+      piece({ status: "skipped", reviewed_at: null, created_at: ago(5) }),
+    ],
+    sessions: READY,
+    now: NOW,
+  });
+  assert.deepEqual(plan.expiredPaths, ["u/s/reel.mp4"]);
+});
+
+test("a decided piece whose session is still working is left alone", () => {
+  const plan = planCleanup({
+    renderAssets: ASSETS,
+    pieces: [piece({ status: "approved", reviewed_at: ago(900) })],
+    sessions: [{ id: "s1", status: "processing", created_at: ago(900) }],
+    now: NOW,
+  });
+  assert.deepEqual(plan.expiredPaths, []);
+});
+
+test("assetsToDelete merges orphans and expired without duplicates", () => {
+  const plan = planCleanup({
+    renderAssets: [
+      ...ASSETS,
+      { id: "orphan", storage_path: "u/s/old.mp4", session_id: "s1" },
+    ],
+    pieces: [piece({ status: "approved", reviewed_at: ago(61) })],
+    sessions: READY,
+    now: NOW,
+  });
+  const ids = plan.assetsToDelete.map((a) => a.id).sort();
+  assert.deepEqual(ids, ["orphan", "post", "vid"]);
+  assert.equal(new Set(ids).size, ids.length, "no id appears twice");
+});
+
+test("the windows are the numbers Jack chose", () => {
+  assert.equal(SKIPPED_RETENTION_DAYS, 1);
+  assert.equal(APPROVED_RETENTION_DAYS, 60);
 });
 
 // ——— helpers ———

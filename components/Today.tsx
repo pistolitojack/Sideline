@@ -743,7 +743,9 @@ export default function Today({
                   >
                     {demo
                       ? "Demo piece — downloads work on your real content."
-                      : "Video still rendering — check back in a minute."}
+                      : selPiece.cleared
+                        ? "Video cleared to save space. Your caption, hashtags and CTA are all still here."
+                        : "Video still rendering — check back in a minute."}
                   </p>
                 )}
                 <button

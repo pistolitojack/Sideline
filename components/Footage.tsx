@@ -66,7 +66,7 @@ export default function Footage({
           background: "linear-gradient(to top, rgba(0,0,0,0.55), transparent)",
         }}
       />
-      {!small && !piece.videoUrl && !piece.rendering && (
+      {!small && !piece.videoUrl && !piece.rendering && !piece.cleared && (
         <div
           className="absolute inset-x-0 flex items-center justify-center px-4"
           style={{ bottom: "26%" }}
@@ -84,6 +84,57 @@ export default function Footage({
           >
             {piece.words[wi]}
           </span>
+        </div>
+      )}
+      {piece.cleared && (
+        // The video file was deleted by the retention policy. Deliberately NOT
+        // the rendering treatment: no spinner and no accent tint, because
+        // nothing is on its way and a spinner would promise otherwise. Plain
+        // grey, stated plainly, and the words that matter — the caption — are
+        // still on the detail sheet below.
+        <div
+          className="absolute inset-0 flex flex-col items-center justify-center"
+          style={{
+            background: "rgba(14,12,10,0.82)",
+            gap: small ? 0 : 6,
+            padding: small ? 4 : 14,
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              fontSize: small ? 13 : 20,
+              lineHeight: 1,
+              opacity: 0.75,
+            }}
+          >
+            ⧗
+          </span>
+          {!small && (
+            <>
+              <span
+                style={{
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: "#fff",
+                  textAlign: "center",
+                }}
+              >
+                Video cleared
+              </span>
+              <span
+                style={{
+                  fontSize: 11,
+                  color: "rgba(255,255,255,0.65)",
+                  textAlign: "center",
+                  lineHeight: 1.35,
+                  maxWidth: 170,
+                }}
+              >
+                Your caption and hashtags are still here
+              </span>
+            </>
+          )}
         </div>
       )}
       {piece.rendering && (

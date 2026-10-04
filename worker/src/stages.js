@@ -28,6 +28,8 @@ import {
   chunks,
   artifactPath,
   RAW_RETENTION_DAYS,
+  SKIPPED_RETENTION_DAYS,
+  APPROVED_RETENTION_DAYS,
 } from "./retention.js";
 
 const MOMENT_TYPES = [
@@ -1629,7 +1631,10 @@ export async function cleanup() {
   // Every read is complete-or-throw. Nothing is deleted on partial knowledge.
   const [renderAssets, pieces, rawAssets, sessions] = await Promise.all([
     readAll("media_assets", "id, storage_path", (q) => q.eq("kind", "render")),
-    readAll("content_pieces", "id, render_asset_id, edl"),
+    readAll(
+      "content_pieces",
+      "id, session_id, render_asset_id, edl, status, reviewed_at, created_at",
+    ),
     readAll("media_assets", "id, storage_path, session_id", (q) =>
       q.eq("kind", "raw"),
     ),
@@ -1654,6 +1659,8 @@ export async function cleanup() {
   );
   console.log(
     `  to remove: ${plan.orphanPaths.length} orphaned renders/posters, ` +
+      `${plan.expiredPaths.length} expired reels ` +
+      `(skipped >${SKIPPED_RETENTION_DAYS}d, approved >${APPROVED_RETENTION_DAYS}d), ` +
       `${plan.artifactPaths.length} intermediates, ` +
       `${plan.rawPaths.length} raw videos past ${RAW_RETENTION_DAYS} days`,
   );
@@ -1673,19 +1680,25 @@ export async function cleanup() {
       console.log(`    would delete orphan: ${p}`);
     if (plan.orphanPaths.length > 10)
       console.log(`    …and ${plan.orphanPaths.length - 10} more orphans`);
+    for (const p of plan.expiredPaths.slice(0, 10))
+      console.log(`    would delete expired: ${p}`);
+    if (plan.expiredPaths.length > 10)
+      console.log(`    …and ${plan.expiredPaths.length - 10} more expired`);
     console.log("cleanup dry run complete — nothing was deleted");
     return null;
   }
 
   let removed = 0;
 
-  // Orphans: the file AND its media_assets row, so the same path is not
-  // re-examined on every future run.
-  for (const batch of chunks(plan.orphans, 100)) {
+  // Orphans and expired reels: the file AND its media_assets row. Deleting the
+  // row is what makes a cleared piece legible to the app — render_asset_id is
+  // ON DELETE SET NULL, so the piece reports "no video" by itself instead of
+  // handing the coach a player pointed at a file that is gone.
+  for (const batch of chunks(plan.assetsToDelete, 100)) {
     const { error: rmErr } = await db.storage
       .from("raw")
       .remove(batch.map((o) => o.storage_path));
-    if (rmErr) throw new Error(`remove orphans: ${rmErr.message}`);
+    if (rmErr) throw new Error(`remove render files: ${rmErr.message}`);
     const { error: delErr } = await db
       .from("media_assets")
       .delete()
@@ -1693,7 +1706,7 @@ export async function cleanup() {
         "id",
         batch.map((o) => o.id),
       );
-    if (delErr) throw new Error(`delete orphan rows: ${delErr.message}`);
+    if (delErr) throw new Error(`delete render rows: ${delErr.message}`);
     removed += batch.length;
   }
 

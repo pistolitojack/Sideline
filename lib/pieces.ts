@@ -61,6 +61,11 @@ const kindLabel = (k: string) =>
   TYPE_LABEL[k] ||
   (k ? k.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase()) : "Reel");
 
+// Statuses that mean the coach has already judged this piece. A piece in one of
+// these states has, by definition, been rendered and watched — so if its video
+// is missing now, retention took it rather than the render failing.
+const DECIDED = ["approved", "skipped", "downloaded"];
+
 export async function loadPieces(
   supabase: SupabaseClient,
   coachId: string
@@ -146,7 +151,14 @@ export async function loadPieces(
         why: r.director_intent ?? r.why ?? "",
         status: r.status as Piece["status"],
         skipReason: r.skip_reason,
-        rendering: !isVideo, // no rendered mp4 yet → show the "Finishing edit…" overlay
+        // A piece only reaches a decided status AFTER it rendered and the coach
+        // reviewed it. So a decided piece with no video did not fail to render —
+        // its file was removed by the retention policy. That tells the two apart
+        // with no extra column.
+        cleared: !isVideo && DECIDED.includes(r.status),
+        // ...which is why `rendering` must exclude that case. Otherwise every
+        // cleared reel would tell the coach it was still rendering, forever.
+        rendering: !isVideo && !DECIDED.includes(r.status),
         revisions: Array.isArray(r.revision_history) ? r.revision_history : [],
       };
     })

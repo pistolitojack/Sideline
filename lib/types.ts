@@ -25,6 +25,13 @@ export type Piece = {
   status: PieceStatus;
   skipReason?: string | null;
   rendering?: boolean; // video not rendered yet (render_asset_id is null)
+  // The video file was deleted by the retention policy — skipped reels after a
+  // day, approved ones after 60. The piece itself is untouched: hook, caption,
+  // hashtags and CTA are all still here, and the AI's memory of it never
+  // depended on the file. Distinct from `rendering`, which means the opposite
+  // (a video is on its way); without the distinction a cleared reel would sit
+  // telling the coach it was still rendering, forever.
+  cleared?: boolean;
   revisions?: { note: string; at: string }[]; // what the coach has asked to change
 };
 

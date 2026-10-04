@@ -14,8 +14,30 @@
 // need the source video to re-cut, keep working for a month.
 export const RAW_RETENTION_DAYS = 30;
 
+// How long a FINISHED reel's video file is kept after the coach decides on it.
+//
+// Skipped reels go fast. The app never displays them again — Today, the day
+// strip and the approved list all filter to approved/downloaded — so the file is
+// dead weight the moment it is swiped away. One day rather than zero buys back
+// the two things instant deletion costs: a mis-swipe is recoverable, and the
+// admin view can still play the reel the same evening, which is where the
+// founder studies what went wrong.
+//
+// Approved reels are kept two months. A coach approves a reel in order to post
+// it, which happens within days. Sixty days is generous against that behaviour,
+// and roughly doubles how many coaches fit under the storage plan compared with
+// six months.
+//
+// The point of these windows is not the megabytes. Without them nothing is ever
+// deleted, so there is no steady state at all — every coach's footprint grows
+// forever. A window turns unbounded growth into a ceiling.
+export const SKIPPED_RETENTION_DAYS = 1;
+export const APPROVED_RETENTION_DAYS = 60;
+
 // A session is finished — and its leftovers collectable — in these states.
 const FINISHED = ["ready", "failed"];
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Where the per-clip intermediates live. Derived from the asset's own path so
 // it stays in step with wherever the clip was uploaded.
@@ -61,6 +83,53 @@ function findOrphans(renderAssets, pieces, finishedIds) {
     heldInFlight: unreferenced.filter((r) => !finishedIds.has(r.session_id))
       .length,
   };
+}
+
+// Which decided pieces have outlived their window, and which of their files go.
+//
+// Returns ASSET IDS, not paths. Deleting the media_assets row is the point:
+// content_pieces.render_asset_id is a foreign key declared ON DELETE SET NULL,
+// so removing the row makes the piece say "I have no video" by itself. Without
+// that the app would keep signing a URL for a file that is not there and show a
+// broken player.
+//
+// A skipped piece keeps its poster. The reel is ~11.94 MB and its poster ~0.07
+// MB, so holding the thumbnail costs 0.6% of the space and keeps the admin view
+// showing what the reel looked like next to the reason it was rejected.
+//
+// Pieces still awaiting review (`ready`) have no window — the coach has not seen
+// them yet, and nothing should expire in front of someone who never looked.
+function findExpired(pieces, finishedIds, now) {
+  const videoIds = new Set();
+  const posterIds = new Set();
+
+  for (const p of pieces) {
+    // Same rule as everything else here: never touch a session still working.
+    if (!finishedIds.has(p.session_id)) continue;
+
+    // When the coach decided. Falls back to creation for pieces made before
+    // review timestamps existed.
+    const decidedAt = p.reviewed_at || p.created_at;
+    if (!decidedAt) continue;
+    const ageMs = now - new Date(decidedAt).getTime();
+    if (!Number.isFinite(ageMs)) continue;
+
+    if (p.status === "skipped") {
+      if (ageMs >= SKIPPED_RETENTION_DAYS * DAY_MS && p.render_asset_id) {
+        videoIds.add(p.render_asset_id);
+      }
+      continue;
+    }
+
+    if (p.status === "approved" || p.status === "downloaded") {
+      if (ageMs < APPROVED_RETENTION_DAYS * DAY_MS) continue;
+      if (p.render_asset_id) videoIds.add(p.render_asset_id);
+      const poster = p.edl?.poster_asset_id;
+      if (poster) posterIds.add(poster);
+    }
+  }
+
+  return { videoIds, posterIds };
 }
 
 // Decide everything cleanup will remove on this run.
@@ -117,10 +186,30 @@ export function planCleanup({
     .filter((a) => oldFinishedIds.has(a.session_id))
     .map((a) => a.storage_path);
 
+  // 4. Finished reels past their window: skipped after SKIPPED_RETENTION_DAYS
+  //    (video only, poster kept), approved and downloaded after
+  //    APPROVED_RETENTION_DAYS (both).
+  const { videoIds, posterIds } = findExpired(pieces, finishedIds, now);
+  const expiredIds = new Set([...videoIds, ...posterIds]);
+  const expired = renderAssets.filter((r) => expiredIds.has(r.id));
+
+  // Orphans and expired pieces can never overlap — an orphan is by definition
+  // referenced by no piece, and an expired file is referenced by one — but they
+  // are merged through a Set so that stays true by construction rather than by
+  // argument. Deleting the same row twice would make the second delete a no-op
+  // and the file count a lie.
+  const byId = new Map();
+  for (const a of [...orphans, ...expired]) byId.set(a.id, a);
+  const assetsToDelete = [...byId.values()];
+
   return {
     orphans,
     orphanPaths: orphans.map((o) => o.storage_path),
     orphanAssetIds: orphans.map((o) => o.id),
+    expired,
+    expiredPaths: expired.map((e) => e.storage_path),
+    // Every media_assets row this run removes, files and rows together.
+    assetsToDelete,
     artifactPaths,
     rawPaths,
     heldInFlight,

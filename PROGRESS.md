@@ -1,5 +1,49 @@
 # Sideline — Build Progress
 
+## Housekeeping item 2b — retention windows on finished reels (2026-10-04) ✅
+
+**The windows, as Jack chose them:**
+- **Skipped: 1 day, video only — the poster is kept.** The app never shows a
+  skipped reel again (Today, the day strip and the approved list all filter to
+  approved/downloaded), so the file is dead weight the moment it is swiped away.
+  One day rather than zero buys back the two things instant deletion costs: a
+  mis-swipe stays recoverable, and the admin view can still play the reel that
+  evening, which is where the bad ones get studied. The poster is 0.07 MB against
+  the reel's 11.94 MB, so keeping the thumbnail costs 0.6% and leaves the admin
+  view showing what was rejected next to the reason why.
+- **Approved and downloaded: 60 days, video and poster both.** A coach approves
+  a reel in order to post it, which happens in days. Sixty rather than 180 nearly
+  doubles how many coaches fit under the storage plan (~75 vs ~40).
+
+**Verified first:** deleting the video cannot affect what the AI learns.
+`memory.js` and `reflect()` both read text columns only — `skip_reason`,
+`skip_reason_text`, `revision_history`, `review_dwell_ms`, `detail_opened` — and
+neither touches storage. The sentence that moved the shortest shot from 2.0s to
+5.5s lives in a text column and outlives the mp4.
+
+**Pieces still awaiting review never expire**, however old. The coach has not
+seen them; nothing should vanish in front of someone who never got to look.
+
+**How a cleared reel stays legible.** Deleting the `media_assets` row is the
+mechanism, not an afterthought: `content_pieces.render_asset_id` is a foreign key
+declared ON DELETE SET NULL, so removing the row makes the piece report "no
+video" by itself, with no new column and no broken player.
+
+That exposed a bug waiting to happen: `rendering` was computed as "no mp4", so
+every cleared reel would have told the coach **"Video still rendering — check
+back in a minute"** forever. A piece only reaches a decided status after it
+rendered and was reviewed, so a decided piece with no video was cleared, not
+unfinished — `cleared` and `rendering` are now mutually exclusive. The cleared
+state is deliberately not the rendering treatment: no spinner, no accent tint,
+because nothing is coming and a spinner would promise otherwise.
+
+**The point of the windows is not the megabytes.** Without them nothing is ever
+deleted, so there is no steady state — every coach's footprint grows forever and
+the "coaches per plan" figure shrinks every month. A window turns unbounded
+growth into a ceiling.
+
+36 retention tests (89 → 101 across the worker). Typecheck and build clean.
+
 ## Housekeeping item 2a — make cleanup actually run (2026-10-02) ✅
 
 **What the dry run found.** 2,266 MB in the bucket, of which **1,091 MB (48%)
