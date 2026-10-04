@@ -1,5 +1,50 @@
 # Sideline — Build Progress
 
+## Item 4 — P2: a way back into onboarding, and pre-fill (2026-10-04) ✅
+
+**The problem.** Nothing in the app linked to `/onboarding`, and the only
+automatic redirect fired for a coach with no profile at all. Changing your sport,
+your tones or your mission meant knowing to type the URL — and the form did not
+pre-fill, so re-running it meant retyping everything or silently overwriting good
+answers with defaults. Everything the AI believes about a coach was effectively
+write-once.
+
+**Fixed:** an always-visible "Edit your Coach DNA" card in Today, and onboarding
+now loads the existing profile into every field. A sport that no chip offers is
+restored into the "Something else" box rather than silently matching nothing.
+Returning coaches get different copy and a "Save changes" button instead of being
+greeted as strangers.
+
+**The trap pre-fill would otherwise have sprung.** `voice_memo_transcript:
+transcript || null` wiped the memo whenever a coach did not re-record — which did
+not matter while re-running onboarding was obscure, and would have started
+destroying data the moment this change made it normal. The key is now omitted
+unless there is a new recording, the same fix the Instagram summary needed for
+the same reason. The voice memo is the composer's only sample of how a coach
+actually talks.
+
+**P3 is substantially fixed by this.** "Mission is a snapshot that never updates"
+was mostly a consequence of there being no way to update anything. A coach can
+now change it in four taps. What remains is whether the app should ever *prompt*
+a revisit — a product decision, not a defect, and better made after watching a
+real coach than guessed at now.
+
+**P4 and P5 deliberately not done.** Both are open questions from the handover
+note rather than defects, and both change what the AI writes:
+- **P4** (use the voice memo's content, not just its style) means loosening the
+  composer's "copy STYLE only, NEVER its topic" rule. That rule is load-bearing:
+  copy describing a different exercise than the video showed was one of the
+  September failures. It is the first judgment-layer change since then and
+  deserves its own item with a before/after flag count — which is exactly what
+  the scorecard and the fingerprints were built to make possible.
+- **P5** (ask for a real caption instead of tone adjectives) adds a question to a
+  mobile-first flow whose north-star rule is to remove decisions, to solve
+  something the Instagram scrape already partly covers (it captures caption
+  length, emoji use and phrasing).
+
+Doing either untested, the day before the first session with a coach who is not
+the founder, is the exact pattern that cost this project a month.
+
 ## Item 3 — onboarding stops lying to the AI (2026-10-04) ✅
 
 **The rule now applied throughout: a pre-selected answer is worse than no

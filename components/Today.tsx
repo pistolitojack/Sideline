@@ -448,6 +448,52 @@ export default function Today({
         </button>
       )}
 
+      {/* The way back into onboarding (P2). Until now nothing in the app linked
+          to it, and the only automatic redirect fired for a coach with no
+          profile at all — so changing your sport, your tones or your mission
+          meant knowing to type the URL. Everything the AI believes about a coach
+          was effectively write-once. Deliberately always visible rather than
+          conditional like the cards above: a profile is never "done". */}
+      {!demo && coachId && (
+        <a
+          href="/onboarding"
+          className="w-full mt-3 flex items-center justify-between sl-card-press"
+          style={{
+            border: `1px solid ${BASE.faint}`,
+            background: BASE.card,
+            borderRadius: 18,
+            padding: "15px 16px",
+            cursor: "pointer",
+            textDecoration: "none",
+            boxShadow: "0 12px 30px -22px rgba(26,25,21,0.4)",
+          }}
+        >
+          <span style={{ minWidth: 0 }}>
+            <span
+              style={{
+                fontSize: 14,
+                fontWeight: 700,
+                color: BASE.ink,
+                display: "block",
+              }}
+            >
+              Edit your Coach DNA
+            </span>
+            <span
+              style={{
+                fontSize: 12,
+                color: BASE.muted,
+                display: "block",
+                marginTop: 2,
+              }}
+            >
+              Sport, tone, audience, what you&rsquo;re chasing right now
+            </span>
+          </span>
+          <span style={{ color: accent, fontWeight: 700, fontSize: 14 }}>→</span>
+        </a>
+      )}
+
       {ready > 0 && (
         <button
           onClick={goReview}

@@ -176,6 +176,9 @@ export default function OnboardingPage() {
   const [scanning, setScanning] = useState(false);
   const [scanned, setScanned] = useState(false);
   const [name, setName] = useState("");
+  // True when a profile already exists, so the screens can say "update" rather
+  // than greet someone who has been using the app for weeks as a stranger.
+  const [returning, setReturning] = useState(false);
   const [sport, setSport] = useState("");
   const [customSport, setCustomSport] = useState("");
   // The colour keeps its default on purpose — it decides what the burned-in
@@ -228,10 +231,45 @@ export default function OnboardingPage() {
       if (!user) return;
       const { data } = await supabase
         .from("coaches")
-        .select("ig_handle")
+        .select(
+          "name, sport, tones, accent_hex, audience, mission, city, ig_handle, voice_memo_transcript",
+        )
         .eq("auth_user_id", user.id)
         .maybeSingle();
       savedHandle.current = data?.ig_handle ?? null;
+      if (!data) return;
+
+      // RETURNING COACH — pre-fill everything (P2).
+      //
+      // Without this, re-running onboarding to change one answer meant retyping
+      // every other one, and anything left untouched was saved back as a
+      // default. The screen built to stop the AI being lied to would have been
+      // the thing doing the lying.
+      setReturning(true);
+      setName(data.name ?? "");
+      // A sport the chips do not offer came from the "Something else" box, so
+      // it belongs back in that box rather than silently matching no chip.
+      if (data.sport) {
+        if (SPORTS.includes(data.sport)) setSport(data.sport);
+        else setCustomSport(data.sport);
+      }
+      if (Array.isArray(data.tones)) setTones(data.tones);
+      const savedAccent = ACCENTS.find((c) => c.a === data.accent_hex);
+      if (savedAccent) setAccent(savedAccent);
+      if (data.audience) {
+        if (AUDIENCES.includes(data.audience)) setAudience(data.audience);
+        else setCustomAudience(data.audience);
+      }
+      if (data.mission) {
+        if (MISSIONS.includes(data.mission)) setMission(data.mission);
+        else setCustomMission(data.mission);
+      }
+      setCity(data.city ?? "");
+      setHandle(data.ig_handle ?? "");
+      // Loaded so a coach who does not re-record keeps the memo they already
+      // gave. See the save() comment — this is the same trap the Instagram
+      // summary fell into.
+      setTranscript(data.voice_memo_transcript ?? "");
     })();
   }, []);
 
@@ -333,7 +371,12 @@ export default function OnboardingPage() {
           mission: customMission.trim() || mission || null,
           city: city.trim() || null,
           ig_handle: newHandle,
-          voice_memo_transcript: transcript || null,
+          // Written only when there is something to write. A returning coach who
+          // skips the recording screen must not lose the memo they already gave
+          // — it is the composer's only sample of how they actually talk, and
+          // `transcript || null` would have overwritten it with null the moment
+          // pre-fill made re-running onboarding a normal thing to do.
+          ...(transcript ? { voice_memo_transcript: transcript } : {}),
           // Only discard the scraped Instagram summary when the handle
           // ACTUALLY changed. Omitting the key leaves the stored value alone,
           // because upsert only writes the columns it is given.
@@ -500,9 +543,19 @@ export default function OnboardingPage() {
               lineHeight: 1.1,
             }}
           >
-            Meet your new
-            <br />
-            marketing employee.
+            {returning ? (
+              <>
+                Update your
+                <br />
+                Coach DNA.
+              </>
+            ) : (
+              <>
+                Meet your new
+                <br />
+                marketing employee.
+              </>
+            )}
           </h1>
           <p
             style={{
@@ -512,9 +565,9 @@ export default function OnboardingPage() {
               lineHeight: 1.55,
             }}
           >
-            You coach. It films nothing, edits everything, and writes your
-            whole week. First, a three-minute interview — it studies your page
-            so it never asks what it can learn.
+            {returning
+              ? "Everything you told it is already filled in. Change what has moved on — your sport, your tone, who you're making this for, what you're chasing right now — and leave the rest alone."
+              : "You coach. It films nothing, edits everything, and writes your whole week. First, a three-minute interview — it studies your page so it never asks what it can learn."}
           </p>
         </div>
         <ObButton label="Start the interview" onClick={() => setStep(1)} ac={ac} />
@@ -917,7 +970,15 @@ export default function OnboardingPage() {
           )}
           <div className="flex-1" />
           <ObButton
-            label={saving ? "Setting up your employee…" : "Let's go"}
+            label={
+              saving
+                ? returning
+                  ? "Saving…"
+                  : "Setting up your employee…"
+                : returning
+                  ? "Save changes"
+                  : "Let's go"
+            }
             onClick={finish}
             ac={ac}
             disabled={saving}
