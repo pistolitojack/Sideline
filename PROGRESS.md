@@ -1,5 +1,49 @@
 # Sideline — Build Progress
 
+## Housekeeping item 2c — make the cleanup log tell the truth (2026-10-04) ✅
+
+**The problem.** Cleanup deletes a raw clip's file but keeps its `media_assets`
+row on purpose — `moments` and every piece's edl reference raw asset ids, so
+dropping the row would break the admin view and the learning history. With no
+record of what had already been purged, each run recomputed the same paths, asked
+storage to delete files that were long gone, and counted them as removed. The log
+read **"cleanup done — removed 217 files" every six hours while deleting
+nothing.** Since the log is how everything else gets verified, a number that
+wrong is worse than no number.
+
+**The fix.** `artifacts_purged_at` and `file_purged_at` on `media_assets`
+(`supabase/v12-purge-tracking.sql`). Two columns, not one: a clip's wav and
+transcript are worthless the moment its session finishes, while the clip itself
+survives another 30 days so revisions keep working. They run on different clocks,
+so one mark could never say which had happened. Renders need no mark — their rows
+are deleted with their files, which is what makes a cleared reel legible.
+
+**Order matters:** files are removed first, marks written second. If a removal
+throws, nothing is marked and the next run retries. The reverse could mark a file
+as purged while it was still sitting there, and nothing would ever look again.
+
+Reading the marks is best-effort — before the migration those columns do not
+exist, and cleanup working noisily beats cleanup refusing to run.
+
+**Expect one more noisy run.** Existing rows start unmarked, so the first cleanup
+after the migration re-reports 158 intermediates and 59 raw videos, deletes
+nothing, and marks everything. Every run after that reports zero.
+
+42 retention tests (107 across the worker).
+
+### Where the storage actually landed
+
+2,266.5 MB → **738.4 MB**, a 67% reduction, verified in SQL.
+
+My estimate of ~75 MB was wrong: I assumed all 879.9 MB of raw footage was past
+30 days. Only ~215 MB was. The remaining ~678 MB is recent footage still inside
+its revision window and will age out by itself. The resting state is ~60 MB of
+live reels plus whatever footage is under 30 days old.
+
+2b confirmed working on real data the same day: the skipped reel decided more
+than a day earlier lost its video (render rows 12 → 11) and kept its poster, and
+no approved reel was touched.
+
 ## Housekeeping item 2b — retention windows on finished reels (2026-10-04) ✅
 
 **The windows, as Jack chose them:**

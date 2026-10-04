@@ -161,11 +161,22 @@ export function planCleanup({
 
   // 2. Intermediates (wav + transcript) of any finished session. These are
   //    worthless the moment the session completes.
+  //
+  //    Skipped once `artifacts_purged_at` is set. Unlike a render, a raw
+  //    asset's ROW outlives its file — `moments` and every piece's edl reference
+  //    raw asset ids, so dropping the row would break the admin view and the
+  //    learning history. Without a mark, cleanup recomputed these same paths on
+  //    every run forever, asked storage to delete files that were already gone,
+  //    and counted them as removed — a log reporting 217 deletions every six
+  //    hours while deleting nothing.
   const artifactPaths = [];
+  const artifactAssetIds = [];
   for (const a of rawAssets) {
     if (!finishedIds.has(a.session_id)) continue;
+    if (a.artifacts_purged_at) continue;
     artifactPaths.push(artifactPath(a, "wav"));
     artifactPaths.push(artifactPath(a, "transcript.json"));
+    artifactAssetIds.push(a.id);
   }
 
   // 3. The original uploads of finished sessions past the retention window —
@@ -182,9 +193,15 @@ export function planCleanup({
       )
       .map((s) => s.id),
   );
-  const rawPaths = rawAssets
-    .filter((a) => oldFinishedIds.has(a.session_id))
-    .map((a) => a.storage_path);
+  // Tracked separately from the intermediates above, because the two are purged
+  // at different times: a clip's wav and transcript die the moment its session
+  // finishes, while the clip itself survives another 30 days so revisions keep
+  // working. One mark could not say which had happened.
+  const expiredRaw = rawAssets.filter(
+    (a) => oldFinishedIds.has(a.session_id) && !a.file_purged_at,
+  );
+  const rawPaths = expiredRaw.map((a) => a.storage_path);
+  const rawAssetIds = expiredRaw.map((a) => a.id);
 
   // 4. Finished reels past their window: skipped after SKIPPED_RETENTION_DAYS
   //    (video only, poster kept), approved and downloaded after
@@ -211,7 +228,11 @@ export function planCleanup({
     // Every media_assets row this run removes, files and rows together.
     assetsToDelete,
     artifactPaths,
+    // Stamped with artifacts_purged_at once their files are gone, so the next
+    // run leaves them alone instead of re-deleting nothing.
+    artifactAssetIds,
     rawPaths,
+    rawAssetIds,
     heldInFlight,
   };
 }

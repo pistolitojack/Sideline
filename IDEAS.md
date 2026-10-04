@@ -71,18 +71,13 @@ Good ideas that are NOT in SPEC.md for V1. Logged here instead of built.
   in the privacy policy, and arguably deserves a line in onboarding. Cheap to
   do, awkward to retrofit after launch.
 
-## Stale media_assets rows after a purge (noticed 2026-10-02)
+## ~~Stale media_assets rows after a purge~~ — DONE 2026-10-04
 
-When cleanup deletes a raw video or an intermediate, the storage file goes but
-the `media_assets` row stays. That is deliberate — `moments` and each piece's edl
-reference raw asset ids, so dropping the rows would break the admin view and the
-learning history. The cost is that cleanup re-issues the same remove calls on
-every run, and the dry run's "rows whose file is already gone" count grows
-forever (43 at the time of writing).
+Fixed in item 2c: `artifacts_purged_at` and `file_purged_at` on media_assets
+(`supabase/v12-purge-tracking.sql`). Cleanup now skips what it has already
+removed, so the log stops reporting 217 deletions every six hours while
+deleting nothing.
 
-Harmless today. A proper fix would be a `purged_at` column on media_assets so
-cleanup can skip what it already removed, which would also make the dry run's
-sanity check meaningful again rather than a slowly rising number.
 
 ## 43 files vanished outside the code path (noticed 2026-10-02)
 

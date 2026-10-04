@@ -1614,6 +1614,35 @@ async function readAll(table, columns, narrow) {
   }
 }
 
+// Remove a set of files, then mark the rows they belonged to so a later run
+// knows not to bother. Returns how many files were actually handed to storage.
+//
+// `column` is artifacts_purged_at or file_purged_at. If that column does not
+// exist yet the mark fails — which is logged and swallowed, because the files
+// really were deleted and failing here would undo nothing. Cleanup simply keeps
+// over-reporting until the migration is run.
+async function purge(paths, assetIds, column) {
+  if (!paths.length) return 0;
+  for (const batch of chunks(paths, 100)) {
+    const { error } = await db.storage.from("raw").remove(batch);
+    if (error) throw new Error(`remove files: ${error.message}`);
+  }
+  const stamp = new Date().toISOString();
+  for (const batch of chunks(assetIds, 100)) {
+    const { error } = await db
+      .from("media_assets")
+      .update({ [column]: stamp })
+      .in("id", batch);
+    if (error) {
+      console.warn(
+        `  could not mark ${column} (${error.message}) — run supabase/v12-purge-tracking.sql`,
+      );
+      break;
+    }
+  }
+  return paths.length;
+}
+
 // Delete files nothing needs any more.
 //
 // Never scheduled until 2026-10-02 — it was complete, registered as a stage,
@@ -1635,9 +1664,22 @@ export async function cleanup() {
       "content_pieces",
       "id, session_id, render_asset_id, edl, status, reviewed_at, created_at",
     ),
-    readAll("media_assets", "id, storage_path, session_id", (q) =>
-      q.eq("kind", "raw"),
-    ),
+    // The purge marks are read best-effort. Before v12-purge-tracking.sql has
+    // been run those columns do not exist, and cleanup still working — just
+    // noisily — beats cleanup refusing to run at all.
+    readAll(
+      "media_assets",
+      "id, storage_path, session_id, artifacts_purged_at, file_purged_at",
+      (q) => q.eq("kind", "raw"),
+    ).catch(async () => {
+      console.warn(
+        "  purge marks unavailable — run supabase/v12-purge-tracking.sql " +
+          "(cleanup will re-report already-deleted files until then)",
+      );
+      return readAll("media_assets", "id, storage_path, session_id", (q) =>
+        q.eq("kind", "raw"),
+      );
+    }),
     readAll("sessions", "id, status, created_at"),
   ]);
 
@@ -1712,14 +1754,19 @@ export async function cleanup() {
 
   // Intermediates and aged-out raw videos. Their media_assets rows are left in
   // place: `moments` and each piece's edl reference raw asset ids, and dropping
-  // the rows would break the admin view and the learning history. The cost is
-  // that these paths are re-issued on later runs — harmless, and the reason the
-  // dry run reports "rows whose file is already gone".
-  for (const batch of chunks([...plan.artifactPaths, ...plan.rawPaths], 100)) {
-    const { error } = await db.storage.from("raw").remove(batch);
-    if (error) throw new Error(`remove files: ${error.message}`);
-    removed += batch.length;
-  }
+  // the rows would break the admin view and the learning history.
+  //
+  // So instead of deleting the row we MARK it, and the mark is what stops
+  // cleanup re-deleting the same already-gone files every six hours and
+  // reporting them as removed. Done in two passes rather than one because a
+  // clip's intermediates and the clip itself expire on different clocks.
+  //
+  // The files go first and the mark second, deliberately. If the removal throws
+  // we never mark, and the next run tries again. The reverse order could mark a
+  // file as purged that is still sitting there, and nothing would ever look at
+  // it again.
+  removed += await purge(plan.artifactPaths, plan.artifactAssetIds, "artifacts_purged_at");
+  removed += await purge(plan.rawPaths, plan.rawAssetIds, "file_purged_at");
 
   console.log(`cleanup done — removed ${removed} files`);
   return null;

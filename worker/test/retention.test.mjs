@@ -437,6 +437,86 @@ test("the windows are the numbers Jack chose", () => {
   assert.equal(APPROVED_RETENTION_DAYS, 60);
 });
 
+// ——— purge marks: never delete the same thing twice ———
+
+const rawAsset = (over) => ({
+  id: "a1",
+  storage_path: "u1/s1/in.mov",
+  session_id: "s1",
+  ...over,
+});
+const OLD_READY = [{ id: "s1", status: "ready", created_at: ago(99) }];
+
+test("intermediates already marked are not re-deleted", () => {
+  const plan = planCleanup({
+    rawAssets: [rawAsset({ artifacts_purged_at: ago(3) })],
+    sessions: OLD_READY,
+    now: NOW,
+  });
+  assert.deepEqual(plan.artifactPaths, []);
+  assert.deepEqual(plan.artifactAssetIds, []);
+});
+
+test("a clip already marked is not re-deleted", () => {
+  const plan = planCleanup({
+    rawAssets: [rawAsset({ file_purged_at: ago(3) })],
+    sessions: OLD_READY,
+    now: NOW,
+  });
+  assert.deepEqual(plan.rawPaths, []);
+  assert.deepEqual(plan.rawAssetIds, []);
+});
+
+test("the two marks are independent — intermediates gone, clip still due", () => {
+  // The whole reason there are two columns: these expire on different clocks.
+  const plan = planCleanup({
+    rawAssets: [rawAsset({ artifacts_purged_at: ago(40) })],
+    sessions: OLD_READY,
+    now: NOW,
+  });
+  assert.deepEqual(plan.artifactPaths, []);
+  assert.deepEqual(plan.rawPaths, ["u1/s1/in.mov"]);
+});
+
+test("clip gone but intermediates not yet marked still collects them", () => {
+  const plan = planCleanup({
+    rawAssets: [rawAsset({ file_purged_at: ago(1) })],
+    sessions: OLD_READY,
+    now: NOW,
+  });
+  assert.equal(plan.artifactPaths.length, 2);
+  assert.deepEqual(plan.rawPaths, []);
+});
+
+test("unmarked rows behave exactly as before (pre-migration)", () => {
+  // Both columns absent, as they are until v12 is run. Nothing should change.
+  const plan = planCleanup({
+    rawAssets: [rawAsset({})],
+    sessions: OLD_READY,
+    now: NOW,
+  });
+  assert.equal(plan.artifactPaths.length, 2);
+  assert.deepEqual(plan.rawPaths, ["u1/s1/in.mov"]);
+  assert.deepEqual(plan.artifactAssetIds, ["a1"]);
+  assert.deepEqual(plan.rawAssetIds, ["a1"]);
+});
+
+test("ids line up with the paths they came from", () => {
+  const plan = planCleanup({
+    rawAssets: [
+      rawAsset({ id: "a1", storage_path: "u/s1/one.mov" }),
+      rawAsset({ id: "a2", storage_path: "u/s1/two.mov", artifacts_purged_at: ago(1) }),
+    ],
+    sessions: OLD_READY,
+    now: NOW,
+  });
+  // a2's intermediates are marked, so only a1 contributes artifact paths.
+  assert.deepEqual(plan.artifactAssetIds, ["a1"]);
+  assert.equal(plan.artifactPaths.length, 2);
+  // Neither clip is marked, so both are still due.
+  assert.deepEqual(plan.rawAssetIds.sort(), ["a1", "a2"]);
+});
+
 // ——— helpers ———
 
 test("artifactPath uses the first two path segments", () => {
