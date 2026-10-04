@@ -193,6 +193,9 @@ export default function OnboardingPage() {
   const [mission, setMission] = useState("");
   const [customMission, setCustomMission] = useState("");
   const [city, setCity] = useState("");
+  // Named stateRegion because `state` reads like React state everywhere else
+  // in this file.
+  const [stateRegion, setStateRegion] = useState("");
 
   const [rec, setRec] = useState<"idle" | "recording" | "processing" | "done">(
     "idle"
@@ -232,7 +235,7 @@ export default function OnboardingPage() {
       const { data } = await supabase
         .from("coaches")
         .select(
-          "name, sport, tones, accent_hex, audience, mission, city, ig_handle, voice_memo_transcript",
+          "name, sport, tones, accent_hex, audience, mission, city, state, ig_handle, voice_memo_transcript",
         )
         .eq("auth_user_id", user.id)
         .maybeSingle();
@@ -265,6 +268,7 @@ export default function OnboardingPage() {
         else setCustomMission(data.mission);
       }
       setCity(data.city ?? "");
+      setStateRegion(data.state ?? "");
       setHandle(data.ig_handle ?? "");
       // Loaded so a coach who does not re-record keeps the memo they already
       // gave. See the save() comment — this is the same trap the Instagram
@@ -370,6 +374,7 @@ export default function OnboardingPage() {
           audience: customAudience.trim() || audience || null,
           mission: customMission.trim() || mission || null,
           city: city.trim() || null,
+          state: stateRegion.trim() || null,
           ig_handle: newHandle,
           // Written only when there is something to write. A returning coach who
           // skips the recording screen must not lose the memo they already gave
@@ -946,23 +951,45 @@ export default function OnboardingPage() {
             title="Where do you coach?"
             sub="This shapes location hashtags and audience tuning."
           />
-          <input
-            value={city}
-            onChange={(e) => setCity(e.target.value)}
-            placeholder="City, State"
-            style={{
-              fontSize: 16,
-              fontWeight: 600,
-              color: BASE.ink,
-              background: BASE.card,
-              border: `1.5px solid ${BASE.faint}`,
-              borderRadius: 14,
-              padding: "13px 16px",
-              width: "100%",
-              marginTop: 18,
-              outline: "none",
-            }}
-          />
+          {/* Two boxes, not one. This was a single input whose placeholder
+              already read "City, State", and it still came back holding just
+              "GA". One box asking for two things reliably gets one of them. */}
+          <div className="flex" style={{ gap: 10, marginTop: 18 }}>
+            <input
+              value={city}
+              onChange={(e) => setCity(e.target.value)}
+              placeholder="City"
+              style={{
+                fontSize: 16,
+                fontWeight: 600,
+                color: BASE.ink,
+                background: BASE.card,
+                border: `1.5px solid ${BASE.faint}`,
+                borderRadius: 14,
+                padding: "13px 16px",
+                flex: 2,
+                minWidth: 0,
+                outline: "none",
+              }}
+            />
+            <input
+              value={stateRegion}
+              onChange={(e) => setStateRegion(e.target.value)}
+              placeholder="State"
+              style={{
+                fontSize: 16,
+                fontWeight: 600,
+                color: BASE.ink,
+                background: BASE.card,
+                border: `1.5px solid ${BASE.faint}`,
+                borderRadius: 14,
+                padding: "13px 16px",
+                flex: 1,
+                minWidth: 0,
+                outline: "none",
+              }}
+            />
+          </div>
           {saveError && (
             <p style={{ fontSize: 13, color: "#B3261E", marginTop: 12 }}>
               {saveError}

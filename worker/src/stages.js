@@ -379,7 +379,7 @@ export async function direct({ session }) {
       `- sport / focus: ${coach.sport ?? "?"}`,
       `- audience: ${coach.audience ?? "?"}`,
       `- mission right now: ${coach.mission ?? "?"}`,
-      `- city: ${coach.city ?? "not set"}`,
+      `- based in: ${[coach.city, coach.state].filter(Boolean).join(", ") || "not set"}`,
       coach.ig_profile
         ? `- their Instagram brand: ${String(coach.ig_profile).slice(0, 800)}`
         : "- Instagram brand: not scanned",

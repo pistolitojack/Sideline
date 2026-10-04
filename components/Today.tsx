@@ -68,6 +68,7 @@ export default function Today({
   const [cityDismissed, setCityDismissed] = useState(true); // assume dismissed until localStorage says otherwise (avoids a flash)
   const [citySheet, setCitySheet] = useState(false);
   const [cityInput, setCityInput] = useState("");
+  const [stateInput, setStateInput] = useState("");
   const [citySaving, setCitySaving] = useState(false);
   const [citySaveErr, setCitySaveErr] = useState<string | null>(null);
 
@@ -84,12 +85,13 @@ export default function Today({
 
   const saveCity = async () => {
     const v = cityInput.trim();
+    const st = stateInput.trim();
     if (!v || citySaving || !coachId) return;
     setCitySaving(true);
     setCitySaveErr(null);
     const { error } = await createClient()
       .from("coaches")
-      .update({ city: v })
+      .update({ city: v, state: st || null })
       .eq("id", coachId);
     if (error) {
       setCitySaveErr("Saving didn't work — try again in a moment.");
@@ -331,6 +333,7 @@ export default function Today({
           <button
             onClick={() => {
               setCityInput("");
+              setStateInput("");
               setCitySaveErr(null);
               setCitySheet(true);
             }}
@@ -647,24 +650,45 @@ export default function Today({
             <p style={{ fontSize: 12.5, color: BASE.muted, marginTop: 3 }}>
               This shapes location hashtags and audience tuning.
             </p>
-            <input
-              value={cityInput}
-              onChange={(e) => setCityInput(e.target.value)}
-              placeholder="City, State"
-              autoFocus
-              style={{
-                fontSize: 16,
-                fontWeight: 600,
-                color: BASE.ink,
-                background: BASE.paper,
-                border: `1.5px solid ${BASE.faint}`,
-                borderRadius: 14,
-                padding: "13px 16px",
-                width: "100%",
-                marginTop: 14,
-                outline: "none",
-              }}
-            />
+            {/* Two boxes, matching onboarding. A single "City, State" input
+                reliably came back holding only one of the two. */}
+            <div className="flex" style={{ gap: 10, marginTop: 14 }}>
+              <input
+                value={cityInput}
+                onChange={(e) => setCityInput(e.target.value)}
+                placeholder="City"
+                autoFocus
+                style={{
+                  fontSize: 16,
+                  fontWeight: 600,
+                  color: BASE.ink,
+                  background: BASE.paper,
+                  border: `1.5px solid ${BASE.faint}`,
+                  borderRadius: 14,
+                  padding: "13px 16px",
+                  flex: 2,
+                  minWidth: 0,
+                  outline: "none",
+                }}
+              />
+              <input
+                value={stateInput}
+                onChange={(e) => setStateInput(e.target.value)}
+                placeholder="State"
+                style={{
+                  fontSize: 16,
+                  fontWeight: 600,
+                  color: BASE.ink,
+                  background: BASE.paper,
+                  border: `1.5px solid ${BASE.faint}`,
+                  borderRadius: 14,
+                  padding: "13px 16px",
+                  flex: 1,
+                  minWidth: 0,
+                  outline: "none",
+                }}
+              />
+            </div>
             {citySaveErr && (
               <p style={{ fontSize: 13, color: "#B3261E", marginTop: 10 }}>
                 {citySaveErr}

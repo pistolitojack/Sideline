@@ -1,5 +1,28 @@
 # Sideline — Build Progress
 
+## Item 5 — city and state as two fields (2026-10-04) ✅
+
+**Found in real data.** The founder's own row came back with `city = "GA"` — the
+state, in the city column. The input was a single box whose placeholder already
+read "City, State", so the hint existed and still did not elicit both halves. One
+box asking for two things reliably gets one of them, and which one is a coin
+toss: the director then builds location hashtags from either a city with no
+region or a region with no city.
+
+**Fixed:** `state` column (`supabase/v13-coach-state.sql`), two inputs in
+onboarding and in Today's quick-add card, and the director's brief now reads
+`based in: Atlanta, GA` instead of `city: GA`.
+
+**Nothing is migrated automatically.** A row holding "GA" is wrong, but guessing
+which half it is — and inventing the other — would put made-up data exactly where
+the AI reads it as fact. That is the failure the last two items removed, and it
+is not worth re-introducing to save one UPDATE. Existing coaches fix it through
+the "Edit your Coach DNA" route that item 4 added.
+
+Director fingerprint moved `77e94e69` → `fde1a741`, by itself, because its prompt
+changed. Third time the automatic versioning has caught a change nobody would
+have thought to record.
+
 ## Item 4 — P2: a way back into onboarding, and pre-fill (2026-10-04) ✅
 
 **The problem.** Nothing in the app linked to `/onboarding`, and the only
