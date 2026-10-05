@@ -86,3 +86,23 @@ The dry run found 43 media_assets rows whose storage file no longer exists. Sinc
 Supabase dashboard, failed uploads that wrote the row before the file landed, or
 the free-tier-to-Pro move. Worth one query to identify if it ever matters; no
 impact today because nothing but the dry run reads those rows.
+
+## Multi-select on onboarding choices (requested 2026-10-05, from the first outside user)
+
+Came out of Jack's dad's onboarding — the first run by someone who is not the
+founder. Every chip group that currently allows one answer should allow several:
+
+  - SPORT — a coach doing speed & agility AND strength has to pick one and the
+    AI reads the other as untrue. Clear case.
+  - AUDIENCE — youth plus high school is an extremely common combination.
+  - MISSION — Jack asked for this too. Worth a conversation first: the mission
+    is what every CTA is aimed at, and a mission of "all four" gives the writer
+    nothing to aim at. "Everything" and "nothing" read identically to the model.
+    Options: cap at two, or mark the first pick as primary.
+  - TONES — already multi-select.
+
+Low-risk implementation: keep the existing `text` columns and store a
+comma-joined string ("Speed & agility, Strength"). The prompts interpolate the
+value as-is, so the model reads it correctly with NO migration and NO prompt
+change. Moving to text[] would mean a migration plus edits at five prompt sites
+for no gain the model can see.
