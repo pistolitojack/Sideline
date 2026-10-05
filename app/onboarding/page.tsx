@@ -53,20 +53,60 @@ const MISSIONS = [
 ];
 const MAX_MEMO_SECONDS = 60;
 
+// Mission is capped where sport and audience are not, and the reason is worth
+// keeping: every call-to-action is aimed at the mission. A coach who coaches two
+// sports genuinely coaches two sports, and the AI can serve both. A coach whose
+// mission is all four has given the writer nothing to aim at — "everything" and
+// "nothing" reach the model identically. Two is a priority; four is a shrug.
+const MISSION_MAX = 2;
+
+// Multi-select answers are stored comma-joined in the existing text columns:
+// "Speed & agility, Strength". The prompts interpolate the value as-is, so the
+// model reads it correctly with no migration and no prompt change — moving to
+// text[] would mean editing five prompt sites for a difference the model cannot
+// see.
+const JOIN = ", ";
+
+// Split a stored value back into the chips it came from, with anything the chip
+// list does not recognise handed back as free text. Without this, a coach who
+// typed "volleyball" would re-open onboarding to find it gone.
+function splitStored(value: string | null | undefined, options: string[]) {
+  const parts = String(value ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return {
+    chosen: parts.filter((p) => options.includes(p)),
+    custom: parts.filter((p) => !options.includes(p)).join(JOIN),
+  };
+}
+
+// Chips plus whatever was typed, as one stored string. Custom text ADDS to the
+// chips rather than replacing them — "Strength" and "volleyball" is a real
+// answer, and with multi-select there is no reason to make it either/or.
+const joinChoices = (chosen: string[], custom: string) =>
+  [...chosen, custom.trim()].filter(Boolean).join(JOIN) || null;
+
 function Chip({
   label,
   on,
   onClick,
   ac,
+  muted = false,
 }: {
   label: string;
   on: boolean;
   onClick: () => void;
   ac: string;
+  // Unavailable because a cap is already met — mission allows two. Faded
+  // rather than hidden, so the limit is visible instead of a tap that appears
+  // to do nothing. Deselecting one frees the slot again.
+  muted?: boolean;
 }) {
   return (
     <button
-      onClick={onClick}
+      onClick={muted ? undefined : onClick}
+      disabled={muted}
       style={{
         fontSize: 14,
         fontWeight: 600,
@@ -75,7 +115,8 @@ function Chip({
         border: `1.5px solid ${on ? ac : BASE.faint}`,
         borderRadius: 999,
         padding: "10px 18px",
-        cursor: "pointer",
+        cursor: muted ? "default" : "pointer",
+        opacity: muted ? 0.38 : 1,
         transition: "all 0.15s",
       }}
     >
@@ -179,7 +220,7 @@ export default function OnboardingPage() {
   // True when a profile already exists, so the screens can say "update" rather
   // than greet someone who has been using the app for weeks as a stranger.
   const [returning, setReturning] = useState(false);
-  const [sport, setSport] = useState("");
+  const [sports, setSports] = useState<string[]>([]);
   const [customSport, setCustomSport] = useState("");
   // The colour keeps its default on purpose — it decides what the burned-in
   // captions look like, and the AI never reasons from it.
@@ -188,9 +229,9 @@ export default function OnboardingPage() {
   // voice memo their actual rhythm and word choice carry far more than five
   // adjectives would. Better empty than invented.
   const [tones, setTones] = useState<string[]>([]);
-  const [audience, setAudience] = useState("");
+  const [audiences, setAudiences] = useState<string[]>([]);
   const [customAudience, setCustomAudience] = useState("");
-  const [mission, setMission] = useState("");
+  const [missions, setMissions] = useState<string[]>([]);
   const [customMission, setCustomMission] = useState("");
   const [city, setCity] = useState("");
   // Named stateRegion because `state` reads like React state everywhere else
@@ -252,21 +293,19 @@ export default function OnboardingPage() {
       setName(data.name ?? "");
       // A sport the chips do not offer came from the "Something else" box, so
       // it belongs back in that box rather than silently matching no chip.
-      if (data.sport) {
-        if (SPORTS.includes(data.sport)) setSport(data.sport);
-        else setCustomSport(data.sport);
-      }
+      const sp = splitStored(data.sport, SPORTS);
+      setSports(sp.chosen);
+      setCustomSport(sp.custom);
       if (Array.isArray(data.tones)) setTones(data.tones);
       const savedAccent = ACCENTS.find((c) => c.a === data.accent_hex);
       if (savedAccent) setAccent(savedAccent);
-      if (data.audience) {
-        if (AUDIENCES.includes(data.audience)) setAudience(data.audience);
-        else setCustomAudience(data.audience);
-      }
-      if (data.mission) {
-        if (MISSIONS.includes(data.mission)) setMission(data.mission);
-        else setCustomMission(data.mission);
-      }
+      const au = splitStored(data.audience, AUDIENCES);
+      setAudiences(au.chosen);
+      setCustomAudience(au.custom);
+      const mi = splitStored(data.mission, MISSIONS);
+      // Trimmed to the cap in case an older row holds more than two.
+      setMissions(mi.chosen.slice(0, MISSION_MAX));
+      setCustomMission(mi.custom);
       setCity(data.city ?? "");
       setStateRegion(data.state ?? "");
       setHandle(data.ig_handle ?? "");
@@ -288,8 +327,18 @@ export default function OnboardingPage() {
     }, 2000);
   };
 
-  const toggleTone = (t: string) =>
-    setTones((ts) => (ts.includes(t) ? ts.filter((x) => x !== t) : [...ts, t]));
+  // One toggle for every multi-select group. `max` is only passed for mission.
+  const toggle = (
+    setter: React.Dispatch<React.SetStateAction<string[]>>,
+    value: string,
+    max?: number,
+  ) =>
+    setter((cur) => {
+      if (cur.includes(value)) return cur.filter((x) => x !== value);
+      if (max && cur.length >= max) return cur; // the chip is muted anyway
+      return [...cur, value];
+    });
+  const toggleTone = (t: string) => toggle(setTones, t);
 
   const stopRecording = () => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -368,11 +417,11 @@ export default function OnboardingPage() {
           // NULL, never "". The prompts render a missing value as "?" so the AI
           // knows it is guessing; an empty string would reach it as a blank
           // after the label, which reads like an answer nobody gave.
-          sport: customSport.trim() || sport || null,
+          sport: joinChoices(sports, customSport),
           tones,
           accent_hex: accent.a,
-          audience: customAudience.trim() || audience || null,
-          mission: customMission.trim() || mission || null,
+          audience: joinChoices(audiences, customAudience),
+          mission: joinChoices(missions, customMission),
           city: city.trim() || null,
           state: stateRegion.trim() || null,
           ig_handle: newHandle,
@@ -743,18 +792,18 @@ export default function OnboardingPage() {
               marginBottom: 7,
             }}
           >
-            You coach
+            You coach{" "}
+            <span style={{ fontWeight: 600, color: BASE.muted }}>
+              — pick all that apply
+            </span>
           </p>
           <div className="flex flex-wrap" style={{ gap: 7 }}>
             {SPORTS.map((s) => (
               <Chip
                 key={s}
                 label={s}
-                on={sport === s && !customSport.trim()}
-                onClick={() => {
-                  setSport(s);
-                  setCustomSport("");
-                }}
+                on={sports.includes(s)}
+                onClick={() => toggle(setSports, s)}
                 ac={ac}
               />
             ))}
@@ -845,7 +894,7 @@ export default function OnboardingPage() {
             label="That's me"
             onClick={() => setStep(3)}
             ac={ac}
-            disabled={!name.trim() || !(customSport.trim() || sport)}
+            disabled={!name.trim() || !(sports.length || customSport.trim())}
           />
         </>
       )}
@@ -855,18 +904,15 @@ export default function OnboardingPage() {
           <H
             kicker={`5 of ${total} · Who it's for`}
             title="Who are you making this for?"
-            sub="Your employee writes every hook and call-to-action at these people. Get this right and everything downstream aims at the right audience."
+            sub="Pick all that apply. Your employee writes every hook and call-to-action at these people, so this is what everything downstream aims at."
           />
           <div className="flex flex-wrap" style={{ gap: 8, marginTop: 18 }}>
             {AUDIENCES.map((a) => (
               <Chip
                 key={a}
                 label={a}
-                on={audience === a && !customAudience.trim()}
-                onClick={() => {
-                  setAudience(a);
-                  setCustomAudience("");
-                }}
+                on={audiences.includes(a)}
+                onClick={() => toggle(setAudiences, a)}
                 ac={ac}
               />
             ))}
@@ -898,18 +944,19 @@ export default function OnboardingPage() {
               marginBottom: 7,
             }}
           >
-            And the mission right now?
+            And the mission right now?{" "}
+            <span style={{ fontWeight: 600, color: BASE.muted }}>
+              — up to 2
+            </span>
           </p>
           <div className="flex flex-wrap" style={{ gap: 8 }}>
             {MISSIONS.map((m) => (
               <Chip
                 key={m}
                 label={m}
-                on={mission === m && !customMission.trim()}
-                onClick={() => {
-                  setMission(m);
-                  setCustomMission("");
-                }}
+                on={missions.includes(m)}
+                muted={!missions.includes(m) && missions.length >= MISSION_MAX}
+                onClick={() => toggle(setMissions, m, MISSION_MAX)}
                 ac={ac}
               />
             ))}
@@ -937,8 +984,8 @@ export default function OnboardingPage() {
             onClick={() => setStep(5)}
             ac={ac}
             disabled={
-              !(customAudience.trim() || audience) ||
-              !(customMission.trim() || mission)
+              !(audiences.length || customAudience.trim()) ||
+              !(missions.length || customMission.trim())
             }
           />
         </>

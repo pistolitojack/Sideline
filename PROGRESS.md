@@ -1,5 +1,37 @@
 # Sideline — Build Progress
 
+## Item 6 — multi-select on sport, audience and mission (2026-10-05) ✅
+
+**The first change driven by someone other than the founder.** Jack's dad ran
+onboarding and the complaint was that the chip groups only allow one answer.
+
+- **Sport** — unlimited. A coach doing speed & agility AND strength had to pick
+  one, and the AI reads sport in all five stages, so the other became a lie five
+  times over.
+- **Audience** — unlimited. Youth plus high school is a common pairing.
+- **Mission** — capped at **two**, deliberately. Every call-to-action is aimed at
+  the mission. A coach who coaches two sports genuinely coaches two sports and
+  the AI can serve both; a coach whose mission is all four has given the writer
+  nothing to aim at, because "everything" and "nothing" reach the model
+  identically. Two is a priority, four is a shrug. Unselected chips fade once two
+  are picked, so the limit is visible rather than a tap that appears to do
+  nothing.
+
+**Stored comma-joined in the existing text columns** — `"Speed & agility,
+Strength"`. The prompts interpolate the value as-is, so the model reads it
+correctly with NO migration and NO prompt change. Moving to `text[]` would have
+meant editing five prompt sites for a difference the model cannot see.
+
+**Custom text is now additive rather than exclusive.** Previously typing in the
+"Something else" box silently replaced the chips; with multi-select, "Strength"
+and "volleyball" is a real answer and both are kept.
+
+**Pre-fill splits the stored string back into chips**, handing anything the chip
+list does not recognise back to the free-text box — otherwise a coach who typed
+"volleyball" would re-open onboarding to find it gone. 13 round-trip cases
+checked, including values containing commas and ampersands, and legacy
+single-value rows written before this change.
+
 ## Item 5 — city and state as two fields (2026-10-04) ✅
 
 **Found in real data.** The founder's own row came back with `city = "GA"` — the
