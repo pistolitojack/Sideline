@@ -1,0 +1,229 @@
+SIDELINE — PHASE C: MAKING THE REELS LOOK MADE
+A briefing for a planning conversation. Written 2026-10-06.
+
+I'm the founder — a former coach, not a programmer. Claude Code writes the code;
+I direct it and judge the output on my phone. I want your honest read, including
+if you think the plan below is wrong.
+
+Everything in Part 2 is read out of the actual code, not remembered. Where I'm
+guessing, I've said so.
+
+===============================================================================
+1. WHAT SIDELINE IS  (30 seconds)
+===============================================================================
+
+A coach films training on their phone, uploads the raw clips, and gets back
+finished vertical reels — cut, captioned, and written — without touching an
+editing app. They swipe to approve or skip, can send one back with a
+plain-English note, then download and post manually.
+
+Pipeline: ingest → DIRECTOR (plans what pieces to make) → transcribe (Deepgram)
+→ understand (finds usable moments) → compose (picks the cuts, writes the copy)
+→ render (ffmpeg) → revise.
+
+The AI learns per coach. Every rejection, every typed note, every re-cut request
+is stored and fed back into planning next time. That part demonstrably works: one
+coach note — "the same clip played twice" — moved the next session's shortest
+shot from 2.0s to 5.5s with no code change.
+
+Two coaches have used it. Me, and my dad, who ran it for the first time
+yesterday and approved 2 of 3 reels.
+
+===============================================================================
+2. WHAT THE RENDERER ACTUALLY DOES TODAY  (the important part)
+===============================================================================
+
+This is the honest inventory. It is smaller than people assume.
+
+FONTS
+  ONE. `/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf`, hardcoded. It is
+  the only font installed in the worker container. It was chosen because it was
+  already there, not for any design reason.
+
+CAPTION STYLES
+  TWO, total:
+    - hook:  54px, white, on a filled box in the coach's accent colour, y=1380
+    - body:  42px, white, 6px black outline at 55% opacity, y=1470
+  Both centred horizontally. Both static — they appear, hold, and disappear.
+  Up to 3 wrapped lines each, hard-wrapped at 20 chars (hook) / 28 (body).
+
+  Only ONE caption is on screen at a time. This is enforced in code, not by the
+  model, because overlapping captions printed on top of each other.
+
+TRANSITIONS
+  Five: cut, fade, slideleft, slideright, circleopen. Chosen by the model per
+  segment. Guidance is "mostly cuts and fades; at most 1-2 specialty wipes".
+
+FRAMING
+  Crop to 9:16, either centred or an eased horizontal pan. 1080x1920, CRF 21,
+  6 Mbps cap.
+
+AUDIO
+  The original clip audio, loudness-normalised. Crossfades between segments.
+  NO music, ever — licensing.
+
+WHAT VARIES BETWEEN TWO DIFFERENT COACHES
+  The accent colour. That is the entire list.
+
+WHAT VARIES BETWEEN A TEACHING REEL AND A HYPE REEL
+  Nothing. They are rendered pixel-identically.
+
+===============================================================================
+3. THE PROBLEM, STATED PLAINLY
+===============================================================================
+
+The AI writes differently for every coach. It does not LOOK different for any of
+them.
+
+Put ten coaches on this and their reels are visually interchangeable — same
+typeface, same two caption treatments, same positions, same transitions. A coach
+whose brand is loud and a coach whose brand is clinical get the same video with a
+different accent colour.
+
+For a product whose pitch is "an AI marketing employee that learns YOUR style",
+that is the gap between what we claim and what we ship.
+
+===============================================================================
+4. WHAT I THINK PHASE C SHOULD BUILD
+===============================================================================
+
+Ordered by my guess at value per unit of risk. I want you to tell me if the order
+is wrong.
+
+--- C1. WORD-SYNCED CAPTIONS ------------------------------------------------
+
+Captions that appear word by word, in time with the speech, rather than a block
+that sits there for four seconds.
+
+WHY THIS IS FIRST: it is the single most recognisable feature of modern
+short-form video, and WE ALREADY HAVE THE DATA. Deepgram returns word-level
+timings and we already store them (`punctuated_word`, start, end per word). We
+wired them into the scorecard yesterday for a different reason. Nothing new has
+to be captured, measured, or guessed.
+
+HOW: almost certainly by generating ASS subtitle files and burning them with
+ffmpeg's `ass` filter, rather than stacking more `drawtext` filters. ASS supports
+karaoke timing, outlines, shadows, positioning and fades natively. The current
+approach — one drawtext filter per caption, chained — does not animate and gets
+unwieldy fast.
+
+WHAT IT CHANGES FOR THE COACH: their reels stop looking like a slideshow with
+subtitles and start looking like something a person edited.
+
+--- C2. A CAPTION STYLE PER FORMAT -------------------------------------------
+
+A teaching reel and a hype reel should not look the same. Roughly:
+  teaching       calm, lower third, smaller, high legibility
+  hype           big, centred, punchy, heavier outline
+  story          minimal, almost no caption
+  client win     testimonial framing, name/credit treatment
+
+Today all four are identical. The piece kind is already stored on every piece
+(`piece_kind`), so the renderer has the information and simply ignores it.
+
+--- C3. REAL TYPEFACES ------------------------------------------------------
+
+Install 3-5 open-licence fonts with genuinely different personalities and let the
+coach pick one in onboarding, or let the director pick per format.
+
+Low technical risk — fonts go in the Docker image and the path is already a
+variable. The hard part is choosing well, not wiring it.
+
+OPEN QUESTION FOR YOU: is "pick your font" a real brand control or a decision we
+are offloading onto a coach who does not want it? Our north-star rule is that
+every screen should REMOVE a decision, not add one.
+
+--- C4. MOTION ON THE CUT ---------------------------------------------------
+
+Punch-ins (a slow scale-up on a held shot), freeze frames at the peak of an
+action, and speed ramps into a key moment.
+
+These are what make a cut feel directed rather than merely correct. All three are
+doable in ffmpeg. All three also carry real risk of looking cheap if applied
+indiscriminately, which is why I have them below captions rather than above.
+
+--- C5. SAFE AREAS ----------------------------------------------------------
+
+Instagram and TikTok overlay their own UI on the bottom ~15% and right edge of
+the frame. I do not know whether our captions at y=1380 and y=1470 (of 1920) sit
+under it. If they do, every caption we have ever burned has been partly covered
+on the platforms the reels are made for.
+
+This is the cheapest item here and possibly the most embarrassing one. [CONFIRM]
+
+===============================================================================
+5. THE THING THAT WORRIES ME ABOUT THIS PHASE
+===============================================================================
+
+Everything we have built to keep ourselves honest measures STRUCTURE, not
+AESTHETICS.
+
+We have an automatic scorecard with nine checks — overlapping captions, a piece
+too short, a shot too short or too long, repeated footage, a hook over eight
+words, captions running past the end, a cut landing mid-word, a reel ending
+mid-sentence. Every one of them is a yes/no fact read out of the edit list.
+
+NONE of them can tell me whether a reel looks good.
+
+That matters because of history. In September we stacked five changes to how the
+AI decides, with no way to measure any of them, and the output got dramatically
+worse — reels with text printed over text, two-second reels, copy describing a
+different exercise than the video showed. It cost a month. The rule that came out
+of it: never change how the AI decides without a way to measure whether it
+helped.
+
+Phase C is the first phase where that rule cannot be followed the same way. I can
+count whether captions overlap. I cannot count whether a punch-in felt right.
+
+QUESTIONS I HAVE ABOUT THIS:
+  - Is there anything in the visual layer that IS objectively checkable, and that
+    we should be detecting automatically? (Contrast ratio? Caption inside the
+    safe area? Text-on-screen reading time versus word count?)
+  - If not, what is the honest substitute — a fixed test set of clips re-rendered
+    on every change and watched side by side?
+  - Should Phase C ship behind a flag so one coach gets the new look and another
+    gets the old one, and the approve/skip rates are compared?
+
+===============================================================================
+6. CONSTRAINTS
+===============================================================================
+
+- ffmpeg only. No After Effects, no Remotion, no headless browser rendering —
+  unless you think one of those is worth the complexity, in which case say so.
+- Render time matters. A session is 3-8 minutes end to end today and a coach is
+  waiting. [CONFIRM: I have not measured what share of that is ffmpeg.]
+- Cost matters. ~$0.35 per session today, ~94% of it the AI rather than compute.
+- No music. Licensing.
+- Mobile-first. Coaches review on a phone, one-handed, often at a gym.
+- I am not a programmer. Whatever you suggest gets built by Claude Code, so
+  "write a custom renderer" is a real cost, not a free suggestion.
+- Two users so far, both related to me. Every claim about what coaches want,
+  including mine, is a guess.
+
+===============================================================================
+7. WHAT I'M ASKING YOU
+===============================================================================
+
+1. IS MY ORDER RIGHT? I have word-synced captions first because the data is
+   already there and the effect is the most recognisable. Tell me if something
+   else should go first, or if any of C1-C5 is not worth doing at all.
+
+2. WHAT AM I MISSING? What does a professionally produced short-form reel have
+   that is not on my list and that ffmpeg can actually do?
+
+3. HOW DO I MEASURE AESTHETICS, OR DO I ACCEPT THAT I CAN'T? This is the question
+   I most want answered. Section 5 is the real risk in this phase.
+
+4. IS ASS THE RIGHT TOOL for animated captions, or is there a better path I
+   don't know about?
+
+5. SHOULD VISUAL STYLE BE A COACH CHOICE OR AN AI DECISION? Picking a font is a
+   decision added to onboarding. Letting the director choose per format is a
+   decision the AI can get wrong. Which is worse?
+
+6. WHAT WOULD YOU NOT DO? If something on this list is a maintenance trap or
+   will date badly, say so.
+
+Please be direct. If an idea of mine is wrong, say it's wrong and show me why.
+I'd much rather hear that than be agreed with and find out three sessions later —
+that exact pattern cost this project a month in September.
