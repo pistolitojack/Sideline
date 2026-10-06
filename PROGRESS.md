@@ -1,5 +1,40 @@
 # Sideline — Build Progress
 
+## Item 9 — show the caption after a reel is approved (2026-10-06) ✅
+
+**Asked for by the first coach who is not the founder.** After approving a reel
+you could replay it in Today and copy its caption — but never read it. The detail
+sheet rendered the hook and nothing else; the caption, call-to-action and
+hashtags existed only inside the Copy button's clipboard payload. The only way to
+see what you were about to post was to paste it somewhere else first.
+
+The sharper version of the problem: **Review already shows all three.** So the
+words were visible while the coach was deciding, and vanished at the exact moment
+they became useful. Today now matches Review.
+
+Caption, CTA (bold) and hashtags (in the coach's accent colour) sit in a scroll
+box directly above the Copy button, so the words and the button that copies them
+read as one thing.
+
+### From the same session — his verdict
+
+Three teaching reels requested, three delivered, **two approved**. On a
+cold-start coach with no history, and the first run by anyone other than the
+founder. His words on the two he kept: "good cutting, good prompting, good
+writing and a really great caption."
+
+**He skipped the third because the cut landed mid-sentence.** The scorecard
+flagged that piece for `hook_too_long` and missed the actual reason entirely —
+none of the seven checks ask whether a cut chops someone off mid-word. That is a
+blind spot worth closing, and it is objectively checkable: Deepgram returns
+word-level timings, so "does this segment end inside a sentence" has a yes/no
+answer. Next candidate item, measurement first.
+
+**Worth not over-reading:** this tells us *teaching* works. Hype, story,
+behind-the-scenes and client win are all untested. Generalising from one format
+is exactly what the director did in September when it dropped montages after a
+single rejection.
+
 ## Item 8 — the Instagram summary, and the copy that caused a duplicate (2026-10-06) ✅
 
 Both found by reading the first outside user's coach row.

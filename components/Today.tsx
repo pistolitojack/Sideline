@@ -818,6 +818,68 @@ export default function Today({
                         : "Video still rendering — check back in a minute."}
                   </p>
                 )}
+                {/* The caption, visible.
+                    Until now the detail sheet showed the hook and nothing else:
+                    the caption, call-to-action and hashtags existed ONLY inside
+                    the Copy button's clipboard payload. A coach could copy words
+                    they had never read, and the only way to see what they were
+                    about to post was to paste it somewhere else first. Raised by
+                    the first coach who is not the founder.
+                    Sits directly above the Copy button so the words and the
+                    button that copies them are one thing. */}
+                {(selPiece.caption || selPiece.cta || selPiece.tags) && (
+                  <div
+                    style={{
+                      marginTop: 12,
+                      padding: "13px 15px",
+                      borderRadius: 14,
+                      background: BASE.paper,
+                      border: `1px solid ${BASE.faint}`,
+                      maxHeight: 220,
+                      overflowY: "auto",
+                    }}
+                  >
+                    {selPiece.caption && (
+                      <p
+                        style={{
+                          fontSize: 13.5,
+                          color: BASE.ink,
+                          lineHeight: 1.5,
+                          whiteSpace: "pre-wrap",
+                        }}
+                      >
+                        {selPiece.caption}
+                      </p>
+                    )}
+                    {selPiece.cta && (
+                      <p
+                        style={{
+                          fontSize: 13.5,
+                          color: BASE.ink,
+                          lineHeight: 1.5,
+                          marginTop: 10,
+                          fontWeight: 700,
+                        }}
+                      >
+                        {selPiece.cta}
+                      </p>
+                    )}
+                    {selPiece.tags && (
+                      <p
+                        style={{
+                          fontSize: 12.5,
+                          color: accent,
+                          lineHeight: 1.5,
+                          marginTop: 10,
+                          fontWeight: 600,
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {selPiece.tags}
+                      </p>
+                    )}
+                  </div>
+                )}
                 <button
                   onClick={() => {
                     const text = [selPiece.caption, selPiece.cta, selPiece.tags]
