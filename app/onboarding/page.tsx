@@ -340,6 +340,12 @@ export default function OnboardingPage() {
     });
   const toggleTone = (t: string) => toggle(setTones, t);
 
+  // Mission is capped at two, and the cap counts PROSE as well as chips. It
+  // previously counted chips only, so typing a goal slipped a third past it —
+  // and the cap exists so the call-to-action has something to aim at, which a
+  // typed goal dilutes exactly as much as a tapped one.
+  const missionsPicked = missions.length + (customMission.trim() ? 1 : 0);
+
   const stopRecording = () => {
     if (timerRef.current) clearInterval(timerRef.current);
     recorderRef.current?.stop();
@@ -811,7 +817,7 @@ export default function OnboardingPage() {
           <input
             value={customSport}
             onChange={(e) => setCustomSport(e.target.value)}
-            placeholder="Something else — volleyball, swimming, track…"
+            placeholder="Add another — volleyball, swimming, track…"
             style={{
               fontSize: 14,
               fontWeight: 600,
@@ -920,7 +926,7 @@ export default function OnboardingPage() {
           <input
             value={customAudience}
             onChange={(e) => setCustomAudience(e.target.value)}
-            placeholder="Or describe them yourself…"
+            placeholder="Add anyone the chips miss…"
             style={{
               fontSize: 14,
               fontWeight: 600,
@@ -955,7 +961,7 @@ export default function OnboardingPage() {
                 key={m}
                 label={m}
                 on={missions.includes(m)}
-                muted={!missions.includes(m) && missions.length >= MISSION_MAX}
+                muted={!missions.includes(m) && missionsPicked >= MISSION_MAX}
                 onClick={() => toggle(setMissions, m, MISSION_MAX)}
                 ac={ac}
               />
@@ -964,7 +970,12 @@ export default function OnboardingPage() {
           <input
             value={customMission}
             onChange={(e) => setCustomMission(e.target.value)}
-            placeholder="Or type your own…"
+            disabled={missions.length >= MISSION_MAX}
+            placeholder={
+              missions.length >= MISSION_MAX
+                ? "Two already picked — deselect one to type your own"
+                : "Or describe it in your own words…"
+            }
             style={{
               fontSize: 14,
               fontWeight: 600,

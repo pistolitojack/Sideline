@@ -1,5 +1,54 @@
 # Sideline — Build Progress
 
+## Item 8 — the Instagram summary, and the copy that caused a duplicate (2026-10-06) ✅
+
+Both found by reading the first outside user's coach row.
+
+### The Instagram scrape was being thrown away — two bugs behind one lie
+
+`ig_profile` was null for **both** coaches while the logs said "scanned IG
+@handle" every single session.
+
+**The write was never checked.** Supabase returns errors in the result object
+rather than throwing, so a failed save was invisible and the success line
+printed regardless. We paid Apify to fetch the coach's real posts, paid Claude to
+summarise them, and dropped the result — meaning the director and composer have
+never once seen a coach's actual brand voice. Same shape as the cleanup log that
+reported removing 217 files while removing none. The write is now checked, falls
+back to saving `ig_profile` alone if `scanned_at` is missing (the summary is the
+point; `scanned_at` only decides when to re-scan), and logs success only on
+actual success.
+
+**It also ran too late.** `ensureIgProfile` was called from `compose`, which is
+*after* the director — so on a coach's first session the director planned the
+entire pack having been told "Instagram brand: not scanned", and only sessions
+from the second onwards benefited. The first session is exactly the one where the
+director knows least and the summary is worth most. It now runs at the top of
+`direct()`; `compose` re-reads the coach row so it still gets it.
+
+Director fingerprint `fde1a741` → `cf4d72c7` — logic changed inside the builder,
+not its wording, which is the documented over-reporting behaviour.
+
+### "Or" promised something the box did not do
+
+The first outside user's audience came back as:
+
+> Youth athletes & their parents, High school athletes, **Young athletes, high
+> school athletes and their parents**
+
+He picked two chips and then retyped the same thing as prose, so the director
+read a redundant audience. Caused by item 6: multi-select made the custom box
+*additive*, but its placeholder still read "Or describe them yourself…". "Or"
+means instead-of. He followed the words, and the words were wrong.
+
+Now "Add anyone the chips miss…" and "Add another — volleyball, swimming,
+track…".
+
+**And the mission cap counted chips only**, so typing a goal slipped a third past
+a limit that exists so the call-to-action has something to aim at. Prose dilutes
+it exactly as much as a tap does, so it now counts toward the two, and the input
+disables itself at the cap with a label saying why.
+
 ## Item 7 — three worker fixes, all found by the first real session (2026-10-06) ✅
 
 The first upload by someone other than the founder stalled twice and needed
