@@ -1,0 +1,3547 @@
+SIDELINE — WORKER CODE SNAPSHOT
+The complete AI pipeline and housekeeping worker, 2026-10-06.
+
+WHY YOU'RE READING THIS
+I'm a former coach, not a programmer. Claude Code writes this; I direct it and
+judge the output. I'd like a second pair of eyes on the code itself.
+
+WHAT I'D MOST LIKE YOU TO LOOK FOR
+
+1. A PATTERN THAT HAS BITTEN US THREE TIMES. Each time the shape was identical:
+   a database write whose result was never checked, plus a log line that
+   reported success anyway. It caused cleanup to report deleting 217 files
+   while deleting none; it caused the Instagram summary to be thrown away every
+   session for months while the log said "scanned IG @handle"; and it let a job
+   claim half-succeed so the job sat "running" forever with no worker on it.
+   Supabase returns errors in the result object rather than throwing, so
+   `await db.from(x).update(y)` with no destructuring is silently fire-and-
+   forget. ARE THERE MORE OF THESE? Is there a systematic fix beyond discipline?
+
+2. ANYTHING THAT CAN HANG OR DEADLOCK. The worker is a single loop: one blocked
+   call stops the pipeline for every coach, not just one. We just put a timeout
+   on the Anthropic call after a 30-minute stall. Deepgram, Apify, Supabase
+   storage and ffmpeg calls have no explicit timeouts that I know of.
+
+3. ERROR PATHS THAT COST A COACH THEIR WORK. The rule here is that a missing
+   column or a failed measurement must never lose a reel. Several writes have
+   deliberate fallbacks. Are any missing?
+
+4. CONCURRENCY. Railway briefly runs two workers during a redeploy. claimJob
+   uses an optimistic update to avoid double-claiming, and cleanup refuses to
+   touch sessions that are not finished. Is that enough?
+
+5. ANYTHING THAT WILL BREAK AT 50 COACHES rather than 2.
+
+CONTEXT: a sister document (STATE-OF-THE-APP.txt) covers what the product does,
+what we've changed and what we think comes next. A third (FIELD-SNAPSHOT.txt)
+maps every database column and what reads it.
+
+Please be direct. If something is wrong, say it's wrong and show me why.
+
+
+===============================================================================
+FILE: worker/src/index.js  (252 lines)
+THE JOB RUNNER — polls the jobs table, runs one stage at a time, reclaims abandoned jobs, schedules cleanup.
+===============================================================================
+
+// Sideline worker — polls the jobs table and runs the pipeline (SPEC.md):
+// ingest → transcribe → understand → compose. No Redis, no queues; a
+// DB-polled job table is enough for V1. Any stage that throws marks the job
+// failed with the error, retries once, and the session shows a friendly
+// failed state in the app.
+
+import { db } from "./supabase.js";
+import { STAGES, cleanup } from "./stages.js";
+
+const POLL_MS = Number(process.env.POLL_INTERVAL_MS || 5000);
+const MAX_ATTEMPTS = 2;
+
+// ——— housekeeping ———
+//
+// cleanup() deletes files nothing needs. It existed, was registered as a stage,
+// and nothing ever queued it, so it had NEVER RUN: by 2026-10-02, 58% of the
+// storage bucket was garbage the function had always been written to collect.
+//
+// It is driven from here rather than the job table on purpose. Every job carries
+// a session, and runJob() marks that session `processing` on the way in and
+// `failed` after two throws. A cleanup job would therefore have bounced a
+// finished session back to "processing", and a storage hiccup would have told
+// the coach their session FAILED — over housekeeping that has nothing to do with
+// their reels.
+//
+// So it runs only when the worker is IDLE, never while a coach is waiting, and
+// a failure is logged and forgotten.
+const CLEANUP_EVERY_MS = Number(
+  process.env.CLEANUP_INTERVAL_MS || 6 * 60 * 60 * 1000,
+);
+// A short settling delay after boot. The redeploy race it was originally
+// guarding against is now handled properly in planCleanup (an in-flight
+// session's assets are untouchable), so this only needs to be long enough to
+// stay out of the way of a worker that boots straight into a queued job.
+const CLEANUP_FIRST_RUN_MS = Number(
+  process.env.CLEANUP_FIRST_RUN_MS || 60 * 1000,
+);
+let nextCleanupAt = Date.now() + CLEANUP_FIRST_RUN_MS;
+
+async function maybeCleanup() {
+  if (Date.now() < nextCleanupAt) return;
+  // Booked BEFORE the attempt, so a cleanup that throws every time waits its
+  // full interval instead of retrying on every poll.
+  nextCleanupAt = Date.now() + CLEANUP_EVERY_MS;
+  try {
+    await cleanup();
+  } catch (err) {
+    // Never fatal. Storage housekeeping failing is not a reason to stop making
+    // reels, and the next run will find the same files still there.
+    console.error(`cleanup failed (will retry later): ${err.message}`);
+  }
+}
+
+// ——— orphaned jobs ———
+//
+// claimJob only ever looks for `pending`. A job is flipped to `running` the
+// instant it is claimed, so if the process dies in the middle — a Railway
+// redeploy, a crash, a platform restart — that job stays `running` forever.
+// Nothing retries it, nothing times it out, and the coach sees "cutting your
+// session" until somebody notices and fixes it by hand. That is what happened
+// to the first session run by someone other than the founder.
+//
+// There is also a narrower version of the same bug: the claim UPDATE succeeds
+// but its response never arrives, so the job is marked `running` while the
+// worker believes it claimed nothing. Same outcome, no crash required.
+//
+// A job older than this with no progress cannot be held by a live worker. The
+// threshold is deliberately generous — far longer than any real stage now that
+// AI calls are bounded — because reclaiming a job another worker is genuinely
+// working on would run the same stage twice.
+const STALE_JOB_MS = Number(process.env.STALE_JOB_MS || 15 * 60 * 1000);
+
+async function reclaimStaleJobs() {
+  const cutoff = new Date(Date.now() - STALE_JOB_MS).toISOString();
+  const { data: stale, error } = await db
+    .from("jobs")
+    .select("id, session_id, stage, attempts")
+    .eq("status", "running")
+    .lt("updated_at", cutoff);
+  if (error) {
+    console.error(`reclaim check failed: ${error.message}`);
+    return;
+  }
+  if (!stale?.length) return;
+
+  for (const job of stale) {
+    // Count the orphaning as an attempt. Without this a job that is somehow
+    // orphaned every time would be retried forever; with it, a coach gets a
+    // clear failure instead of a session that processes for eternity.
+    const attempts = (job.attempts ?? 0) + 1;
+    const giveUp = attempts >= MAX_ATTEMPTS;
+    await db
+      .from("jobs")
+      .update({
+        status: giveUp ? "failed" : "pending",
+        attempts,
+        error: giveUp
+          ? `abandoned at stage "${job.stage}" ${attempts} times — the worker stopped mid-run`
+          : null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", job.id)
+      // Only if nobody has touched it since we read it.
+      .eq("status", "running");
+    if (giveUp) {
+      await db
+        .from("sessions")
+        .update({ status: "failed" })
+        .eq("id", job.session_id);
+      console.error(
+        `session ${job.session_id}: giving up on "${job.stage}" after ${attempts} abandoned runs`,
+      );
+    } else {
+      console.log(
+        `session ${job.session_id}: reclaiming "${job.stage}" — abandoned mid-run (attempt ${attempts})`,
+      );
+    }
+  }
+}
+
+async function claimJob() {
+  const { data: candidates, error } = await db
+    .from("jobs")
+    .select("*")
+    .eq("status", "pending")
+    .order("created_at", { ascending: true })
+    .limit(1);
+  if (error) {
+    console.error("poll error:", error.message);
+    return null;
+  }
+  const job = candidates?.[0];
+  if (!job) return null;
+
+  // Optimistic claim — only one worker wins the update.
+  const { data: claimed } = await db
+    .from("jobs")
+    .update({ status: "running", updated_at: new Date().toISOString() })
+    .eq("id", job.id)
+    .eq("status", "pending")
+    .select("*")
+    .single();
+  return claimed ?? null;
+}
+
+async function loadSession(id) {
+  const { data, error } = await db
+    .from("sessions")
+    .select("*")
+    .eq("id", id)
+    .single();
+  if (error) throw new Error(`load session: ${error.message}`);
+  return data;
+}
+
+async function runJob(job) {
+  const stageFn = STAGES[job.stage];
+  if (!stageFn) throw new Error(`unknown stage "${job.stage}"`);
+
+  const session = await loadSession(job.session_id);
+  await db
+    .from("sessions")
+    .update({ status: "processing" })
+    .eq("id", session.id);
+
+  console.log(`session ${session.id} → ${job.stage}…`);
+  const next = await stageFn({ session });
+
+  if (next) {
+    await db
+      .from("jobs")
+      .update({
+        stage: next,
+        status: "pending",
+        attempts: 0,
+        error: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", job.id);
+  } else {
+    await db
+      .from("jobs")
+      .update({ status: "done", updated_at: new Date().toISOString() })
+      .eq("id", job.id);
+    await db.from("sessions").update({ status: "ready" }).eq("id", session.id);
+    console.log(`session ${session.id} ✓ ready`);
+  }
+}
+
+async function failJob(job, err) {
+  const attempts = (job.attempts ?? 0) + 1;
+  const fatal = attempts >= MAX_ATTEMPTS;
+  console.error(
+    `session ${job.session_id} stage ${job.stage} failed (attempt ${attempts}): ${err.message}`
+  );
+  await db
+    .from("jobs")
+    .update({
+      status: fatal ? "failed" : "pending",
+      attempts,
+      error: String(err.message).slice(0, 900),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", job.id);
+  if (fatal) {
+    await db
+      .from("sessions")
+      .update({ status: "failed" })
+      .eq("id", job.session_id);
+  }
+}
+
+async function loop() {
+  console.log(`Sideline worker up — polling every ${POLL_MS}ms`);
+  // Say this out loud at boot. Housekeeping that runs on a timer is otherwise
+  // indistinguishable from housekeeping that is not running at all — which is
+  // exactly how cleanup() stayed dead for a month without anyone noticing.
+  // Seeing this line also proves the deploy picked up the new code.
+  console.log(
+    `  housekeeping: first cleanup in ${Math.round(CLEANUP_FIRST_RUN_MS / 1000)}s, ` +
+      `then every ${Math.round(CLEANUP_EVERY_MS / 3600000)}h` +
+      (/^(1|true|yes)$/i.test(process.env.CLEANUP_DRY_RUN ?? "")
+        ? " — DRY RUN, nothing will be deleted"
+        : ""),
+  );
+  // Immediately, not on the idle timer: this boot is very often the restart
+  // that orphaned a job in the first place, and the coach is already waiting.
+  await reclaimStaleJobs();
+  for (;;) {
+    try {
+      const job = await claimJob();
+      if (job) {
+        try {
+          await runJob(job);
+        } catch (err) {
+          await failJob(job, err);
+        }
+        continue; // check immediately for the next stage
+      }
+      // Nothing to do for any coach right now — a safe moment to take out the
+      // bins and to look for work somebody else dropped. Only reached when
+      // claimJob() found no pending work, so neither can delay a coach.
+      await reclaimStaleJobs();
+      await maybeCleanup();
+    } catch (err) {
+      console.error("loop error:", err.message);
+    }
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
+}
+
+loop();
+
+
+===============================================================================
+FILE: worker/src/claude.js  (200 lines)
+THE AI CALL — timeout, retries, prompt caching, and the JSON extractor that salvages truncated replies.
+===============================================================================
+
+import Anthropic from "@anthropic-ai/sdk";
+import { readFile } from "node:fs/promises";
+
+// Model pinned by SPEC.md.
+export const MODEL = "claude-sonnet-4-6";
+
+// WHY THESE ARE SET EXPLICITLY
+//
+// They were not, so the SDK's defaults applied: a 10-minute timeout with 2
+// automatic retries. A request that never answers therefore blocks the worker
+// for up to 30 minutes — and because the worker is a single loop, that is not
+// one slow session, it is the whole pipeline stopped for every coach. The first
+// outside user hit exactly this: 17 minutes of total silence on `understand`,
+// job stuck in `running`, nothing in the logs, no error, no recovery.
+//
+// Real calls in production run 2-20 seconds. Three minutes is far beyond any
+// legitimate response, including the image-heavy director call, so a request
+// still running at that point is hung rather than slow. Worst case is now about
+// nine minutes across all retries instead of thirty, and it ends in a thrown
+// error the job runner can actually see and retry.
+const REQUEST_TIMEOUT_MS = Number(process.env.CLAUDE_TIMEOUT_MS || 180_000);
+const MAX_RETRIES = Number(process.env.CLAUDE_MAX_RETRIES || 2);
+
+// A call slower than this is worth noticing before it becomes a hang.
+const SLOW_CALL_MS = 45_000;
+
+const client = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  timeout: REQUEST_TIMEOUT_MS,
+  maxRetries: MAX_RETRIES,
+});
+
+// Mark the LAST block of a stable prefix (coach profile, sampled frames, voice
+// memo, IG summary). Everything up to and including that block is cached by
+// Anthropic and re-read cheaply by later calls sharing the same prefix.
+// Caching only engages above a minimum prefix size (~1k tokens), which is why
+// we mark image-heavy and profile blocks rather than short instructions.
+export function cacheable(block) {
+  return { ...block, cache_control: { type: "ephemeral" } };
+}
+
+export async function askClaude({
+  system,
+  content,
+  maxTokens = 4000,
+  label = "claude",
+}) {
+  // A string system prompt becomes a cached text block so it never re-bills.
+  const sys =
+    typeof system === "string"
+      ? [{ type: "text", text: system, cache_control: { type: "ephemeral" } }]
+      : system;
+
+  const startedAt = Date.now();
+  let res;
+  try {
+    res = await client.messages.create({
+      model: MODEL,
+      max_tokens: maxTokens,
+      system: sys,
+      messages: [{ role: "user", content }],
+    });
+  } catch (err) {
+    // Say how long we waited. A timeout and a rejected key look identical in a
+    // bare error message, and the difference decides what to go and fix.
+    const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
+    throw new Error(`${label} failed after ${secs}s: ${err.message}`);
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+  const u = res.usage ?? {};
+  const write = u.cache_creation_input_tokens ?? 0;
+  const read = u.cache_read_input_tokens ?? 0;
+  console.log(
+    `  [tokens] ${label}: in=${u.input_tokens ?? 0} cache_write=${write} ` +
+      `cache_read=${read} out=${u.output_tokens ?? 0}` +
+      `  ${(elapsedMs / 1000).toFixed(1)}s` +
+      (read > 0 ? "  <- cache HIT" : "")
+  );
+  if (elapsedMs > SLOW_CALL_MS) {
+    console.warn(
+      `  SLOW: ${label} took ${(elapsedMs / 1000).toFixed(1)}s ` +
+        `(timeout is ${REQUEST_TIMEOUT_MS / 1000}s)`,
+    );
+  }
+
+  return res.content
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+}
+
+export async function imageBlock(path) {
+  const data = await readFile(path);
+  return {
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: "image/jpeg",
+      data: data.toString("base64"),
+    },
+  };
+}
+
+// Pull the first JSON array or object out of a model reply, tolerating
+// stray prose or code fences around it.
+//
+// Every stage now asks the model to reason inside a <thinking> block before it
+// answers. That prose routinely contains braces and quotes, so it MUST be
+// removed before we hunt for the JSON payload — otherwise the bracket walker
+// locks onto a brace inside the reasoning and fails to parse.
+export function extractJson(text) {
+  const cleaned = String(text)
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
+    // An unclosed <thinking> means the reply was cut off mid-reasoning; there
+    // is no JSON after it, so drop the tail.
+    .replace(/<thinking>[\s\S]*$/i, "");
+  const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const candidate = fenced ? fenced[1] : cleaned;
+  const start = candidate.search(/[\[{]/);
+  if (start === -1) throw new Error("Claude returned no JSON");
+  // Walk to the matching close bracket.
+  const open = candidate[start];
+  const close = open === "[" ? "]" : "}";
+  let depth = 0;
+  for (let i = start; i < candidate.length; i++) {
+    const ch = candidate[i];
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) {
+        return JSON.parse(candidate.slice(start, i + 1));
+      }
+    }
+  }
+  // The reply was cut off mid-JSON (the model ran out of output budget).
+  // Rather than throwing away the whole session, close whatever is still open
+  // and parse what we got — the stages all tolerate missing fields, so a
+  // slightly short plan still beats a failed upload.
+  try {
+    const salvaged = JSON.parse(closeOpenJson(candidate.slice(start)));
+    console.warn("  (recovered a truncated JSON reply)");
+    return salvaged;
+  } catch {
+    throw new Error("Claude returned unbalanced JSON");
+  }
+}
+
+// Close the quote/brackets a truncated JSON fragment is missing, and drop any
+// half-written trailing token (a dangling comma, a colon with no value, or a
+// key whose value never arrived).
+function balanceJson(fragment) {
+  const stack = [];
+  let inStr = false;
+  let esc = false;
+  for (const ch of fragment) {
+    if (esc) {
+      esc = false;
+      continue;
+    }
+    if (ch === "\\") {
+      esc = true;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = !inStr;
+      continue;
+    }
+    if (inStr) continue;
+    if (ch === "{" || ch === "[") stack.push(ch);
+    else if (ch === "}" || ch === "]") stack.pop();
+  }
+  let out = fragment;
+  if (inStr) out += '"';
+  out = out
+    .replace(/[,:]\s*$/, "") // dangling comma or colon
+    .replace(/,?\s*"[^"]*"\s*:\s*$/, ""); // key with no value
+  while (stack.length) out += stack.pop() === "{" ? "}" : "]";
+  return out;
+}
+
+// Truncation can land anywhere — mid-number, mid-key, inside a nested object.
+// Walk back comma by comma until a version parses, so we keep as much of the
+// reply as is actually valid instead of losing the whole piece.
+function closeOpenJson(fragment) {
+  let cut = fragment.length;
+  for (let i = 0; i < 40 && cut > 0; i++) {
+    const attempt = balanceJson(fragment.slice(0, cut));
+    try {
+      JSON.parse(attempt);
+      return attempt;
+    } catch {
+      /* try an earlier boundary */
+    }
+    const prev = fragment.lastIndexOf(",", cut - 1);
+    if (prev <= 0) break;
+    cut = prev;
+  }
+  return balanceJson(fragment);
+}
+
+
+===============================================================================
+FILE: worker/src/scorecard.js  (196 lines)
+THE SCORECARD — nine structural checks, pure, no I/O. This is the ruler everything else is measured with.
+===============================================================================
+
+// Phase 3.1 — the objective scorecard.
+//
+// Structural checks that run on every finished piece before the coach ever
+// sees it. These are DETECTORS, not opinions: each one either fired or it
+// didn't. No severity, no score, no judgment about whether a piece is good —
+// only whether it is structurally broken in a way we can prove from the JSON.
+//
+// This exists because the only quality signal this project ever had was Jack
+// watching finished reels, which costs minutes and real money per subjective
+// data point. Anything checkable here is checkable in milliseconds, for free,
+// on every piece, forever.
+//
+// Deliberately has NO imports and no I/O: it is pure, so it can be tested
+// exhaustively without a database, an API key, or a video.
+
+// Floating-point slack. Segment and caption times come from model output via
+// JSON, so exact equality is never safe — two shots that meet at 6.0s must not
+// read as overlapping.
+const EPS = 0.01;
+
+const PIECE_MIN_SEC = 5;
+const SEGMENT_MIN_SEC = 0.5;
+const HOOK_MAX_WORDS = 8;
+
+// SPEECH CHECKS — added after the first outside coach rejected a reel for "a
+// sentence that was incomplete in the video". The scorecard flagged that piece
+// for a long hook and missed the actual reason entirely: seven checks and not
+// one asked whether a cut chopped the speaker off mid-flow.
+//
+// These are as objective as the rest. Deepgram returns word-level timings and
+// we store `punctuated_word`, so "does this cut land inside a word" and "does
+// this reel end mid-sentence" both have yes/no answers rather than opinions.
+
+// A word still being spoken across a cut. Sliced by more than this and a
+// listener hears half a syllable.
+const WORD_SLICE_SEC = 0.06;
+
+// Speech resuming this soon after the final cut means the speaker was still
+// going — the reel ended on them rather than with them.
+const SPEECH_CONTINUES_SEC = 0.35;
+
+// Sentence-ending punctuation, allowing a trailing quote or bracket.
+const ENDS_SENTENCE = /[.!?…]["')\]]*$/;
+
+const dur = (s) => Number(s.out) - Number(s.in);
+
+// Words belonging to one segment's source clip, in time order.
+const wordsFor = (speech, assetId) => {
+  const list = speech?.[assetId];
+  return Array.isArray(list)
+    ? list
+        .filter(
+          (w) => Number.isFinite(Number(w?.s)) && Number.isFinite(Number(w?.e)),
+        )
+        .sort((a, b) => Number(a.s) - Number(b.s))
+    : [];
+};
+
+// Is a word still mid-utterance at time t?
+const slicedAt = (words, t) =>
+  words.some(
+    (w) =>
+      Number(w.s) < t - WORD_SLICE_SEC && Number(w.e) > t + WORD_SLICE_SEC,
+  );
+
+// Do two [a0,a1) / [b0,b1) ranges genuinely share time?
+const overlaps = (a0, a1, b0, b1) =>
+  Math.min(Number(a1), Number(b1)) - Math.max(Number(a0), Number(b0)) > EPS;
+
+/**
+ * Returns a sorted array of flag strings — empty when the piece is clean.
+ *
+ * @param {object}   piece
+ * @param {object}   piece.edl               the stored EDL ({segments, captions})
+ * @param {string}   piece.hook              the written hook
+ * @param {number}   piece.targetLengthSec   the director's target for this piece
+ */
+export function scorePiece({ edl, hook, targetLengthSec, speech } = {}) {
+  const flags = new Set();
+
+  const segments = Array.isArray(edl?.segments) ? edl.segments : [];
+  const captions = Array.isArray(edl?.captions) ? edl.captions : [];
+
+  const usable = segments.filter(
+    (s) => Number.isFinite(Number(s?.in)) && Number.isFinite(Number(s?.out)),
+  );
+  const totalDur = usable.reduce((sum, s) => sum + dur(s), 0);
+
+  // — piece length —
+  if (totalDur < PIECE_MIN_SEC) flags.add("piece_too_short");
+
+  // — segment length —
+  for (const s of usable) {
+    if (dur(s) < SEGMENT_MIN_SEC) {
+      flags.add("segment_too_short");
+      break;
+    }
+  }
+
+  // A single shot eating half the piece is only wrong when the piece was
+  // supposed to be a multi-shot cut — a one-segment piece IS the whole piece.
+  const target = Number(targetLengthSec);
+  if (usable.length > 1 && Number.isFinite(target) && target > 0) {
+    for (const s of usable) {
+      if (dur(s) > target / 2 + EPS) {
+        flags.add("segment_too_long");
+        break;
+      }
+    }
+  }
+
+  // — the same footage cut in twice —
+  outer: for (let i = 0; i < usable.length; i++) {
+    for (let j = i + 1; j < usable.length; j++) {
+      const a = usable[i];
+      const b = usable[j];
+      if (
+        a.asset_id &&
+        a.asset_id === b.asset_id &&
+        overlaps(a.in, a.out, b.in, b.out)
+      ) {
+        flags.add("footage_repeated");
+        break outer;
+      }
+    }
+  }
+
+  // — captions sharing the screen —
+  const caps = captions.filter(
+    (c) => Number.isFinite(Number(c?.t0)) && Number.isFinite(Number(c?.t1)),
+  );
+  outer2: for (let i = 0; i < caps.length; i++) {
+    for (let j = i + 1; j < caps.length; j++) {
+      if (overlaps(caps[i].t0, caps[i].t1, caps[j].t0, caps[j].t1)) {
+        flags.add("captions_overlap");
+        break outer2;
+      }
+    }
+  }
+
+  // — a caption still on screen after the video ends —
+  for (const c of caps) {
+    if (Number(c.t1) > totalDur + EPS) {
+      flags.add("captions_run_past_end");
+      break;
+    }
+  }
+
+  // — hook length —
+  // Only count real words. Sideline's copy is full of spaced em dashes
+  // ("Freeze at the peak — this is..."), and counting one as a word would
+  // inflate every hook that uses the house style by one.
+  const words = String(hook ?? "")
+    .split(/\s+/)
+    .filter((w) => /[\p{L}\p{N}]/u.test(w));
+  if (words.length > HOOK_MAX_WORDS) flags.add("hook_too_long");
+
+  // — speech boundaries —
+  //
+  // Needs word timings, which only exist when a clip had speech. No speech, no
+  // transcript, or no timings passed in means these simply do not fire: silent
+  // footage cannot be cut off mid-sentence, and a missing transcript must never
+  // invent a defect.
+  if (speech && usable.length) {
+    // 1. A cut that slices a word in half, at either end of any segment. This
+    //    is unambiguous — you hear part of a syllable — so it needs no
+    //    judgement about whether the sentence was "finished".
+    for (const s of usable) {
+      const words = wordsFor(speech, s.asset_id);
+      if (!words.length) continue;
+      if (slicedAt(words, Number(s.in)) || slicedAt(words, Number(s.out))) {
+        flags.add("cut_mid_word");
+        break;
+      }
+    }
+
+    // 2. The reel ends while the speaker is still going — the complaint that
+    //    started this check. Two conditions must BOTH hold, so a piece that
+    //    simply ends on a quiet beat is not flagged: the last audible word
+    //    does not close a sentence, AND speech resumes almost immediately
+    //    after the cut.
+    const last = usable[usable.length - 1];
+    const words = wordsFor(speech, last.asset_id);
+    const out = Number(last.out);
+    const spoken = words.filter((w) => Number(w.e) <= out + WORD_SLICE_SEC);
+    if (spoken.length) {
+      const closed = ENDS_SENTENCE.test(String(spoken[spoken.length - 1].w ?? "").trim());
+      const resumesAt = words.find((w) => Number(w.s) > out - WORD_SLICE_SEC);
+      const resumesSoon =
+        resumesAt && Number(resumesAt.s) - out < SPEECH_CONTINUES_SEC;
+      if (!closed && resumesSoon) flags.add("ends_mid_sentence");
+    }
+  }
+
+  return [...flags].sort();
+}
+
+
+===============================================================================
+FILE: worker/src/retention.js  (247 lines)
+WHAT CLEANUP MAY DELETE — pure decision logic, split out so it can be tested without risking real reels.
+===============================================================================
+
+// What cleanup is allowed to delete — the decision, with no I/O.
+//
+// WHY THIS IS A SEPARATE MODULE
+// cleanup() deletes files permanently. Until now its decision logic was tangled
+// up with the database calls that execute it, which meant it could not be
+// tested without a live Supabase and a willingness to lose real reels. Nobody
+// was ever going to run that test, so the logic went unexamined — and it had
+// been unreachable since the day it was written, so nothing caught it.
+//
+// Everything here is pure: given lists of rows, it returns lists of paths. The
+// scary half (actually removing files) stays in stages.js and does no thinking.
+
+// Raw footage is kept this long after a session finishes so revisions, which
+// need the source video to re-cut, keep working for a month.
+export const RAW_RETENTION_DAYS = 30;
+
+// How long a FINISHED reel's video file is kept after the coach decides on it.
+//
+// Skipped reels go fast. The app never displays them again — Today, the day
+// strip and the approved list all filter to approved/downloaded — so the file is
+// dead weight the moment it is swiped away. One day rather than zero buys back
+// the two things instant deletion costs: a mis-swipe is recoverable, and the
+// admin view can still play the reel the same evening, which is where the
+// founder studies what went wrong.
+//
+// Approved reels are kept two months. A coach approves a reel in order to post
+// it, which happens within days. Sixty days is generous against that behaviour,
+// and roughly doubles how many coaches fit under the storage plan compared with
+// six months.
+//
+// The point of these windows is not the megabytes. Without them nothing is ever
+// deleted, so there is no steady state at all — every coach's footprint grows
+// forever. A window turns unbounded growth into a ceiling.
+export const SKIPPED_RETENTION_DAYS = 1;
+export const APPROVED_RETENTION_DAYS = 60;
+
+// A session is finished — and its leftovers collectable — in these states.
+const FINISHED = ["ready", "failed"];
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Where the per-clip intermediates live. Derived from the asset's own path so
+// it stays in step with wherever the clip was uploaded.
+//
+// Shared with stages.js on purpose: ingest writes these files and cleanup
+// deletes them, and if the two ever disagreed about the path, cleanup would
+// silently delete nothing while reporting success.
+export function artifactPath(asset, name) {
+  const dir = asset.storage_path.split("/").slice(0, 2).join("/");
+  return `${dir}/artifacts/${asset.id}.${name}`;
+}
+
+// Which render assets does no content piece point at any more?
+//
+// A piece references its video through render_asset_id and its poster from
+// inside its edl. Both count — miss the poster link and every poster in the
+// account looks unreferenced.
+//
+// THE RACE THIS GUARDS AGAINST, which is subtle and would have destroyed work:
+// render() inserts the media_assets row and only THEN updates the piece to point
+// at it. In the gap between those two statements, a freshly rendered reel is
+// indistinguishable from an orphan. The poster has the same gap in
+// composePlannedPiece(). One worker never trips this, because cleanup only runs
+// from the idle branch of its own loop — but a Railway redeploy briefly runs two
+// workers, and an idle one would happily delete the reel the busy one just made.
+//
+// So orphan collection is restricted to sessions that are FINISHED. An in-flight
+// session is `processing`, which puts every asset it is still creating out of
+// reach no matter how many workers are running. It also makes cleanup's rule
+// uniform: it only ever touches sessions that are done.
+function findOrphans(renderAssets, pieces, finishedIds) {
+  const referenced = new Set();
+  for (const p of pieces) {
+    if (p.render_asset_id) referenced.add(p.render_asset_id);
+    const poster = p.edl?.poster_asset_id;
+    if (poster) referenced.add(poster);
+  }
+  const unreferenced = renderAssets.filter((r) => !referenced.has(r.id));
+  return {
+    orphans: unreferenced.filter((r) => finishedIds.has(r.session_id)),
+    // Reported, not deleted. If this is ever large it means sessions are
+    // getting stuck mid-pipeline, which is worth knowing on its own.
+    heldInFlight: unreferenced.filter((r) => !finishedIds.has(r.session_id))
+      .length,
+  };
+}
+
+// Which decided pieces have outlived their window, and which of their files go.
+//
+// Returns ASSET IDS, not paths. Deleting the media_assets row is the point:
+// content_pieces.render_asset_id is a foreign key declared ON DELETE SET NULL,
+// so removing the row makes the piece say "I have no video" by itself. Without
+// that the app would keep signing a URL for a file that is not there and show a
+// broken player.
+//
+// A skipped piece keeps its poster. The reel is ~11.94 MB and its poster ~0.07
+// MB, so holding the thumbnail costs 0.6% of the space and keeps the admin view
+// showing what the reel looked like next to the reason it was rejected.
+//
+// Pieces still awaiting review (`ready`) have no window — the coach has not seen
+// them yet, and nothing should expire in front of someone who never looked.
+function findExpired(pieces, finishedIds, now) {
+  const videoIds = new Set();
+  const posterIds = new Set();
+
+  for (const p of pieces) {
+    // Same rule as everything else here: never touch a session still working.
+    if (!finishedIds.has(p.session_id)) continue;
+
+    // When the coach decided. Falls back to creation for pieces made before
+    // review timestamps existed.
+    const decidedAt = p.reviewed_at || p.created_at;
+    if (!decidedAt) continue;
+    const ageMs = now - new Date(decidedAt).getTime();
+    if (!Number.isFinite(ageMs)) continue;
+
+    if (p.status === "skipped") {
+      if (ageMs >= SKIPPED_RETENTION_DAYS * DAY_MS && p.render_asset_id) {
+        videoIds.add(p.render_asset_id);
+      }
+      continue;
+    }
+
+    if (p.status === "approved" || p.status === "downloaded") {
+      if (ageMs < APPROVED_RETENTION_DAYS * DAY_MS) continue;
+      if (p.render_asset_id) videoIds.add(p.render_asset_id);
+      const poster = p.edl?.poster_asset_id;
+      if (poster) posterIds.add(poster);
+    }
+  }
+
+  return { videoIds, posterIds };
+}
+
+// Decide everything cleanup will remove on this run.
+//
+// Takes COMPLETE lists. A caller that passes a truncated `pieces` list gets a
+// plan that deletes live reels, so the reads that feed this must be paginated
+// and must throw rather than return partial data. See readAll() in stages.js.
+export function planCleanup({
+  renderAssets = [],
+  pieces = [],
+  rawAssets = [],
+  sessions = [],
+  now = Date.now(),
+} = {}) {
+  // Which sessions are done. Nothing cleanup does ever touches a session that
+  // is still working — see findOrphans for the race that makes this essential.
+  const finishedIds = new Set(
+    sessions.filter((s) => FINISHED.includes(s.status)).map((s) => s.id),
+  );
+
+  // 1. Renders and posters nothing references: old re-renders, and the files
+  //    of pieces that were deleted. Deleting a piece row does not touch its
+  //    media_assets rows, so every deleted piece leaves two files behind.
+  const { orphans, heldInFlight } = findOrphans(
+    renderAssets,
+    pieces,
+    finishedIds,
+  );
+
+  // 2. Intermediates (wav + transcript) of any finished session. These are
+  //    worthless the moment the session completes.
+  //
+  //    Skipped once `artifacts_purged_at` is set. Unlike a render, a raw
+  //    asset's ROW outlives its file — `moments` and every piece's edl reference
+  //    raw asset ids, so dropping the row would break the admin view and the
+  //    learning history. Without a mark, cleanup recomputed these same paths on
+  //    every run forever, asked storage to delete files that were already gone,
+  //    and counted them as removed — a log reporting 217 deletions every six
+  //    hours while deleting nothing.
+  const artifactPaths = [];
+  const artifactAssetIds = [];
+  for (const a of rawAssets) {
+    if (!finishedIds.has(a.session_id)) continue;
+    if (a.artifacts_purged_at) continue;
+    artifactPaths.push(artifactPath(a, "wav"));
+    artifactPaths.push(artifactPath(a, "transcript.json"));
+    artifactAssetIds.push(a.id);
+  }
+
+  // 3. The original uploads of finished sessions past the retention window —
+  //    the single biggest consumer of space. After this a reel can no longer be
+  //    re-cut, which is why the window exists at all.
+  const cutoff = now - RAW_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const oldFinishedIds = new Set(
+    sessions
+      .filter(
+        (s) =>
+          FINISHED.includes(s.status) &&
+          s.created_at &&
+          new Date(s.created_at).getTime() < cutoff,
+      )
+      .map((s) => s.id),
+  );
+  // Tracked separately from the intermediates above, because the two are purged
+  // at different times: a clip's wav and transcript die the moment its session
+  // finishes, while the clip itself survives another 30 days so revisions keep
+  // working. One mark could not say which had happened.
+  const expiredRaw = rawAssets.filter(
+    (a) => oldFinishedIds.has(a.session_id) && !a.file_purged_at,
+  );
+  const rawPaths = expiredRaw.map((a) => a.storage_path);
+  const rawAssetIds = expiredRaw.map((a) => a.id);
+
+  // 4. Finished reels past their window: skipped after SKIPPED_RETENTION_DAYS
+  //    (video only, poster kept), approved and downloaded after
+  //    APPROVED_RETENTION_DAYS (both).
+  const { videoIds, posterIds } = findExpired(pieces, finishedIds, now);
+  const expiredIds = new Set([...videoIds, ...posterIds]);
+  const expired = renderAssets.filter((r) => expiredIds.has(r.id));
+
+  // Orphans and expired pieces can never overlap — an orphan is by definition
+  // referenced by no piece, and an expired file is referenced by one — but they
+  // are merged through a Set so that stays true by construction rather than by
+  // argument. Deleting the same row twice would make the second delete a no-op
+  // and the file count a lie.
+  const byId = new Map();
+  for (const a of [...orphans, ...expired]) byId.set(a.id, a);
+  const assetsToDelete = [...byId.values()];
+
+  return {
+    orphans,
+    orphanPaths: orphans.map((o) => o.storage_path),
+    orphanAssetIds: orphans.map((o) => o.id),
+    expired,
+    expiredPaths: expired.map((e) => e.storage_path),
+    // Every media_assets row this run removes, files and rows together.
+    assetsToDelete,
+    artifactPaths,
+    // Stamped with artifacts_purged_at once their files are gone, so the next
+    // run leaves them alone instead of re-deleting nothing.
+    artifactAssetIds,
+    rawPaths,
+    rawAssetIds,
+    heldInFlight,
+  };
+}
+
+// Split a list into fixed-size batches. Storage removes and `in` filters both
+// have request limits, so every bulk operation goes out in chunks.
+export function chunks(arr, n) {
+  if (!Array.isArray(arr) || n < 1) return [];
+  return Array.from({ length: Math.ceil(arr.length / n) }, (_, i) =>
+    arr.slice(i * n, i * n + n),
+  );
+}
+
+
+===============================================================================
+FILE: worker/src/memory.js  (279 lines)
+COACH MEMORY — what the director is told about this coach's past decisions.
+===============================================================================
+
+// Phase 3.6 — coach memory.
+//
+// Until now the director met every coach for the first time, every session. It
+// had their profile but no idea what they had ever said yes or no to. This
+// loads what the coach has actually done — approved, skipped and why, sent
+// back for changes, which starting points they reach for, how long they look
+// before deciding — and hands it to the director as OBSERVATION, not as
+// instruction. The AI decides what to do with it.
+//
+// Two rules this module exists to keep:
+//   1. A coach with no history gets NO section at all, not an empty scaffold.
+//      An empty table would read as "this coach likes nothing".
+//   2. Founder ratings are deliberately absent. Those are our internal
+//      calibration signal, not the coach's behaviour.
+//
+// Loading and formatting are separate on purpose: `formatCoachMemory` is pure,
+// so the wording can be tested exhaustively without a database.
+
+const APPROVED = new Set(["approved", "downloaded"]);
+
+// Read the coach's recent history. Returns a plain data object — no prose.
+export async function loadCoachHistory(db, coachId) {
+  const { data: sessions } = await db
+    .from("sessions")
+    .select("id, prompt_chip, prompt_source, prompt_length, created_at")
+    .eq("coach_id", coachId)
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  const ids = (sessions ?? []).map((s) => s.id);
+  if (!ids.length) return null;
+
+  const { data: pieces } = await db
+    .from("content_pieces")
+    .select(
+      "hook, piece_kind, director_intent, status, skip_reason, skip_reason_text, revision_history, review_dwell_ms, detail_opened, reviewed_at"
+    )
+    .in("session_id", ids)
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  // Phase 3.7 — what the AI has already concluded about this coach. Loaded
+  // separately because it survives even when raw history is thin.
+  const { data: reflections } = await db
+    .from("coach_reflections")
+    .select("reflection, craft_lesson, preference_note, created_at")
+    .eq("coach_id", coachId)
+    .order("created_at", { ascending: false })
+    .limit(5);
+
+  return {
+    // Chip stats come from the most recent 20 sessions only — how a coach asks
+    // for work drifts, and old habits shouldn't outvote current ones.
+    sessions: (sessions ?? []).slice(0, 20),
+    pieces: pieces ?? [],
+    reflections: reflections ?? [],
+  };
+}
+
+const pct = (n, total) => (total ? Math.round((n / total) * 100) : 0);
+const shorten = (s, n) => String(s ?? "").trim().slice(0, n);
+
+// Turn the history into the plain-text section the director reads.
+// Returns "" when there is nothing worth saying.
+export function formatCoachMemory(history) {
+  if (!history) return "";
+  const pieces = Array.isArray(history.pieces) ? history.pieces : [];
+  const sessions = Array.isArray(history.sessions) ? history.sessions : [];
+
+  const approved = pieces.filter((p) => APPROVED.has(p.status));
+  const skipped = pieces.filter((p) => p.status === "skipped");
+  const decided = approved.length + skipped.length;
+
+  // Craft lessons and preference notes are kept apart all the way through.
+  // Collapsing them here would undo the point of splitting them at all.
+  const rows = Array.isArray(history.reflections) ? history.reflections : [];
+  const crafts = rows
+    .map((r) => r?.craft_lesson || (r?.preference_note ? null : r?.reflection))
+    .filter(Boolean);
+  const prefs = rows.map((r) => r?.preference_note).filter(Boolean);
+  const reflections = [...crafts, ...prefs];
+
+  // Nothing decided AND nothing concluded means nothing learned yet. Say
+  // nothing at all rather than showing an empty scaffold.
+  if (!decided && !reflections.length) return "";
+
+  const lines = [
+    "WHAT THIS COACH RESPONDS TO",
+    "This is their real history with you. It is here so you can serve them",
+    "better — read it, weigh it, and decide for yourself what it means. It is",
+    "not a set of rules, and their request for THIS upload still comes first.",
+    "",
+  ];
+
+  // ——— what we have already concluded (Phase 3.7) ———
+  // Placed first deliberately: this is the synthesis, and everything below it
+  // is the evidence behind it.
+  if (crafts.length) {
+    lines.push(
+      "WHAT YOU'VE LEARNED TO DO BETTER (newest first — your own notes from",
+      "past sessions). These are about HOW to make a piece and apply to EVERY",
+      "kind. They are not reasons to stop making any kind of piece:"
+    );
+    for (const r of crafts.slice(0, 5)) lines.push(`  - ${shorten(r, 400)}`);
+    lines.push("");
+  }
+
+  if (prefs.length) {
+    lines.push(
+      "WHAT THEY SEEM TO PREFER (patterns held across sessions — still worth",
+      "testing, and always outranked by what they ask for today):"
+    );
+    for (const r of prefs.slice(0, 3)) lines.push(`  - ${shorten(r, 400)}`);
+    lines.push("");
+  }
+
+  if (!decided) return lines.join("\n").trimEnd();
+
+  // ——— approval rate by kind ———
+  const byKind = new Map();
+  for (const p of [...approved, ...skipped]) {
+    const k = p.piece_kind || "unknown";
+    const e = byKind.get(k) ?? { yes: 0, total: 0 };
+    e.total += 1;
+    if (APPROVED.has(p.status)) e.yes += 1;
+    byKind.set(k, e);
+  }
+  // Below this, a percentage is theatre. "0%" off one piece reads as "never",
+  // which is exactly how the director came to write "we're skipping montage
+  // since that format got rejected" after ONE rejected montage.
+  const ENOUGH_TO_GENERALISE = 5;
+
+  const kindRows = [...byKind.entries()]
+    .sort((a, b) => b[1].total - a[1].total)
+    .map(([k, e]) =>
+      e.total >= ENOUGH_TO_GENERALISE
+        ? `  - ${k}: kept ${e.yes} of ${e.total} (${pct(e.yes, e.total)}%)`
+        : `  - ${k}: kept ${e.yes} of ${e.total} — only ${e.total} piece${
+            e.total === 1 ? "" : "s"
+          }, too few to mean anything yet`
+    );
+  if (kindRows.length) {
+    lines.push(
+      `They have decided on ${decided} piece${decided === 1 ? "" : "s"}.`,
+      "These are TALLIES, NOT PREFERENCES. A kind that got rejected is almost",
+      "always a craft problem to fix, not a format to stop making — read the",
+      "rejection reason below before you conclude anything. Do not drop a kind",
+      "from your plan because a small number of them were rejected; make a",
+      "better one instead.",
+      ...kindRows,
+      ""
+    );
+  }
+
+  // ——— what they kept ———
+  if (approved.length) {
+    lines.push("PIECES THEY KEPT (most recent first):");
+    for (const p of approved.slice(0, 20)) {
+      lines.push(
+        `  - [${p.piece_kind || "?"}] "${shorten(p.hook, 90)}"` +
+          (p.director_intent ? ` — made because: ${shorten(p.director_intent, 110)}` : "")
+      );
+    }
+    lines.push("");
+  }
+
+  // ——— what they rejected, and in their own words ———
+  if (skipped.length) {
+    lines.push("PIECES THEY REJECTED (most recent first):");
+    for (const p of skipped.slice(0, 20)) {
+      const why = [
+        p.skip_reason ? `reason: ${p.skip_reason}` : null,
+        p.skip_reason_text ? `they said: "${shorten(p.skip_reason_text, 140)}"` : null,
+      ]
+        .filter(Boolean)
+        .join("; ");
+      lines.push(
+        `  - [${p.piece_kind || "?"}] "${shorten(p.hook, 90)}"` +
+          (why ? ` — ${why}` : " — no reason given")
+      );
+    }
+    lines.push("");
+  }
+
+  // ——— changes they asked for: the sharpest signal there is ———
+  const revisions = [];
+  for (const p of pieces) {
+    for (const r of Array.isArray(p.revision_history) ? p.revision_history : []) {
+      if (r?.note) revisions.push({ hook: p.hook, note: r.note });
+    }
+  }
+  if (revisions.length) {
+    lines.push(
+      "CHANGES THEY ASKED FOR — they wanted the piece, but not as you made it.",
+      "This is the most direct correction you get:"
+    );
+    for (const r of revisions.slice(0, 10)) {
+      lines.push(`  - on "${shorten(r.hook, 70)}" they asked: "${shorten(r.note, 160)}"`);
+    }
+    lines.push("");
+  }
+
+  // ——— how they ask for work ———
+  const withChip = sessions.filter((s) => s.prompt_chip);
+  if (sessions.length) {
+    const chipCounts = new Map();
+    for (const s of withChip)
+      chipCounts.set(s.prompt_chip, (chipCounts.get(s.prompt_chip) ?? 0) + 1);
+    const srcCounts = new Map();
+    for (const s of sessions)
+      if (s.prompt_source)
+        srcCounts.set(s.prompt_source, (srcCounts.get(s.prompt_source) ?? 0) + 1);
+    const lengths = sessions
+      .map((s) => Number(s.prompt_length))
+      .filter((n) => Number.isFinite(n) && n > 0);
+
+    const bits = [];
+    if (chipCounts.size)
+      bits.push(
+        "  - starting points they pick: " +
+          [...chipCounts.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([c, n]) => `${c} (${n}x)`)
+            .join(", ")
+      );
+    if (srcCounts.size)
+      bits.push(
+        "  - how they send it: " +
+          [...srcCounts.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([s, n]) => `${s} ${pct(n, sessions.length)}%`)
+            .join(", ")
+      );
+    if (lengths.length)
+      bits.push(
+        `  - typical request length: ${Math.round(
+          lengths.reduce((a, b) => a + b, 0) / lengths.length
+        )} characters`
+      );
+    if (bits.length) {
+      lines.push(`HOW THEY ASK (last ${sessions.length} sessions):`, ...bits, "");
+    }
+  }
+
+  // ——— how they review ———
+  const avg = (rows) => {
+    const ns = rows
+      .map((p) => Number(p.review_dwell_ms))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    return ns.length ? Math.round(ns.reduce((a, b) => a + b, 0) / ns.length / 100) / 10 : null;
+  };
+  const aDwell = avg(approved);
+  const sDwell = avg(skipped);
+  const opened = pieces.filter((p) => p.detail_opened).length;
+  const reviewed = pieces.filter((p) => p.reviewed_at).length;
+  const behaviour = [];
+  if (aDwell != null) behaviour.push(`  - average ${aDwell}s before keeping a piece`);
+  if (sDwell != null) behaviour.push(`  - average ${sDwell}s before rejecting one`);
+  if (reviewed)
+    behaviour.push(
+      `  - opened the detail view on ${pct(opened, reviewed)}% of pieces before deciding`
+    );
+  if (behaviour.length) lines.push("HOW THEY REVIEW:", ...behaviour, "");
+
+  return lines.join("\n").trimEnd();
+}
+
+// Convenience: load and format in one call. Returns "" for a coach with no
+// usable history, which is the signal to omit the section entirely.
+export async function coachMemory(db, coachId) {
+  try {
+    return formatCoachMemory(await loadCoachHistory(db, coachId));
+  } catch (e) {
+    // Memory is an enhancement. A coach must still get their reels if the
+    // history query fails for any reason.
+    console.warn(`  coach memory unavailable: ${e.message}`);
+    return "";
+  }
+}
+
+
+===============================================================================
+FILE: worker/src/fingerprint.js  (76 lines)
+AUTOMATIC PROMPT VERSIONS — hashes the prompt-building functions.
+===============================================================================
+
+// Automatic prompt versioning.
+//
+// WHY THIS EXISTS
+// Phase 3.8 stamped every piece with a prompt version number typed by hand in
+// a PROMPT_VERSIONS map. That only works if someone remembers to bump it. Miss
+// one and the column doesn't go blank — it reports the OLD version for a NEW
+// prompt, which is worse than having no column at all. A blank tells you you
+// don't know; a stale number tells you something false and you build on it.
+//
+// So the version is no longer a decision. It's derived from the code that
+// builds the prompt.
+//
+// WHY WE HASH THE FUNCTION, NOT THE PROMPT TEXT
+// The obvious move is to hash the finished prompt string. That doesn't work:
+// an assembled prompt contains the session's own data — sampled frames, the
+// coach's memory block, transcripts, the clip list. It is different every
+// single session, so its hash would change constantly and mean nothing.
+//
+// What we actually want to identify is the RECIPE, not the meal. The recipe is
+// the source code of the function that assembles the prompt, and that text
+// changes only when we change it.
+//
+// WHAT THIS DELIBERATELY OVER-REPORTS
+// The fingerprint covers the whole function, so editing non-prompt logic
+// inside it — a clamp, a loop — also moves the hash. That is the intended
+// direction of error. Those edits can change the output too, and a fingerprint
+// that occasionally says "something changed" when the wording didn't is far
+// safer than one that stays put while the wording did. It can never miss.
+//
+// ONE DEPENDENCY WORTH KNOWING
+// This reads Function.prototype.toString(), which returns real source text
+// because the worker runs plain ES modules straight from src/ with no build
+// step (see worker/Dockerfile). If a bundler or minifier is ever added, every
+// fingerprint changes once, in one commit. That shows up as a clean break in
+// the data rather than silent drift, but it is worth knowing before anyone
+// wonders why every version rolled over on the same day.
+
+import { createHash } from "node:crypto";
+
+// Eight hex characters: 4.3 billion values, which is far more than a project
+// with a few dozen prompt revisions will ever need, and short enough to read
+// out loud and paste into a WHERE clause.
+const FP_LENGTH = 8;
+
+// Hash whatever text we're given. Separate from fingerprint() so the tests can
+// check the hashing itself without building functions.
+export function hashText(text) {
+  return createHash("sha256")
+    .update(String(text ?? ""), "utf8")
+    .digest("hex")
+    .slice(0, FP_LENGTH);
+}
+
+// The fingerprint of a prompt-building function.
+//
+// Returns null rather than throwing for anything that isn't a function. This is
+// telemetry: a bad argument here must cost us a measurement, never a coach
+// their reel.
+export function fingerprint(fn) {
+  if (typeof fn !== "function") return null;
+  return hashText(fn.toString());
+}
+
+// Fingerprint several functions at once, as {name: hash}.
+//
+// Computed ONCE at module load and reused, because a function's source cannot
+// change while the process is running. Re-hashing per session would be a few
+// microseconds of waste, but more importantly it would invite the idea that
+// these can drift mid-run. They can't.
+export function fingerprintAll(fns) {
+  const out = {};
+  for (const [name, fn] of Object.entries(fns ?? {})) {
+    out[name] = fingerprint(fn);
+  }
+  return out;
+}
+
+
+===============================================================================
+FILE: worker/src/supabase.js  (55 lines)
+DB + STORAGE HELPERS.
+===============================================================================
+
+import { createClient } from "@supabase/supabase-js";
+import { readFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+
+const url = process.env.SUPABASE_URL;
+const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+if (!url || !key) {
+  console.error(
+    "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY — set them in the worker's environment."
+  );
+  process.exit(1);
+}
+
+// Service-role client: bypasses RLS. This key must NEVER ship to a browser.
+export const db = createClient(url, key, {
+  auth: { persistSession: false },
+});
+
+const BUCKET = "raw";
+
+export async function downloadTo(storagePath, localPath) {
+  const { data, error } = await db.storage.from(BUCKET).download(storagePath);
+  if (error) throw new Error(`download ${storagePath}: ${error.message}`);
+  // Stream to disk — big source videos must never sit in memory.
+  await pipeline(Readable.fromWeb(data.stream()), createWriteStream(localPath));
+  return localPath;
+}
+
+export async function uploadFrom(localPath, storagePath, contentType) {
+  const body = await readFile(localPath);
+  const { error } = await db.storage
+    .from(BUCKET)
+    .upload(storagePath, body, { contentType, upsert: true });
+  if (error) throw new Error(`upload ${storagePath}: ${error.message}`);
+  return storagePath;
+}
+
+export async function uploadJson(obj, storagePath) {
+  const { error } = await db.storage
+    .from(BUCKET)
+    .upload(storagePath, Buffer.from(JSON.stringify(obj)), {
+      contentType: "application/json",
+      upsert: true,
+    });
+  if (error) throw new Error(`upload ${storagePath}: ${error.message}`);
+  return storagePath;
+}
+
+export async function downloadJson(storagePath) {
+  const { data, error } = await db.storage.from(BUCKET).download(storagePath);
+  if (error) throw new Error(`download ${storagePath}: ${error.message}`);
+  return JSON.parse(await data.text());
+}
+
+
+===============================================================================
+FILE: worker/src/ffmpeg.js  (109 lines)
+FFMPEG WRAPPERS — probe, audio extract, frame sampling, poster frames.
+===============================================================================
+
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const run = promisify(execFile);
+const OPTS = { maxBuffer: 32 * 1024 * 1024 };
+
+// Quiet, non-interactive ffmpeg: only real errors reach the logs, and a
+// failure surfaces as one short message instead of the whole transcript.
+const QUIET = ["-nostdin", "-hide_banner", "-loglevel", "error"];
+
+async function ff(args) {
+  try {
+    await run("ffmpeg", [...QUIET, ...args], OPTS);
+  } catch (e) {
+    if (e.signal === "SIGKILL" || (!e.stderr && e.killed !== false && !e.code)) {
+      throw new Error(
+        "ffmpeg was killed by the machine (out of memory) — the worker needs a bigger instance or lighter settings"
+      );
+    }
+    const tail = String(e.stderr || "")
+      .trim()
+      .split("\n")
+      .slice(-6)
+      .join(" | ")
+      .slice(-700);
+    throw new Error(
+      `ffmpeg failed (exit ${e.code ?? "?"}${e.signal ? ", signal " + e.signal : ""}): ${tail || "no error output"}`
+    );
+  }
+}
+
+export async function probe(localPath) {
+  const { stdout } = await run(
+    "ffprobe",
+    [
+      "-v", "error",
+      "-print_format", "json",
+      "-show_format",
+      "-show_streams",
+      localPath,
+    ],
+    OPTS
+  );
+  const info = JSON.parse(stdout);
+  const video = info.streams?.find((s) => s.codec_type === "video");
+  const audio = info.streams?.find((s) => s.codec_type === "audio");
+  // Phones store portrait video as landscape + a rotation tag; ffmpeg
+  // auto-rotates frames on decode, so report the *displayed* dimensions.
+  const rot = Math.abs(
+    Number(
+      video?.side_data_list?.find((d) => d.rotation !== undefined)?.rotation ??
+        0
+    )
+  );
+  const swapped = rot % 180 === 90;
+  return {
+    duration: Number(info.format?.duration) || null,
+    width: (swapped ? video?.height : video?.width) ?? null,
+    height: (swapped ? video?.width : video?.height) ?? null,
+    hasAudio: Boolean(audio),
+  };
+}
+
+export async function extractAudioWav(localPath, outPath) {
+  await ff([
+    "-y", "-i", localPath,
+    "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+    outPath,
+  ]);
+  return outPath;
+}
+
+// Sample frames ~1 per 2s, capped at maxFrames, resized to 512px wide.
+// Returns [{ path, t }] with the timestamp each frame represents.
+export async function sampleFrames(localPath, duration, outDir, maxFrames = 30) {
+  const interval = Math.max(1.5, (duration || 60) / maxFrames);
+  await ff([
+    "-y", "-i", localPath,
+    "-vf", `fps=1/${interval},scale=512:-2`,
+    "-q:v", "6",
+    `${outDir}/frame_%03d.jpg`,
+  ]);
+  const { readdir } = await import("node:fs/promises");
+  const files = (await readdir(outDir))
+    .filter((f) => f.startsWith("frame_"))
+    .sort()
+    .slice(0, maxFrames);
+  return files.map((f, i) => ({
+    path: `${outDir}/${f}`,
+    t: Math.round(i * interval * 10) / 10,
+  }));
+}
+
+export async function ffmpegRun(args) {
+  await ff(args);
+}
+
+export async function posterFrame(localPath, atSeconds, outPath) {
+  await ff([
+    "-y",
+    "-ss", String(Math.max(0, atSeconds)),
+    "-i", localPath,
+    "-frames:v", "1",
+    "-vf", "scale=720:-2",
+    "-q:v", "4",
+    outPath,
+  ]);
+  return outPath;
+}
+
+
+===============================================================================
+FILE: worker/src/stages.js  (2031 lines)
+THE PIPELINE — every stage, every prompt. The big one.
+===============================================================================
+
+// The four Phase-4 pipeline stages. Each takes a context, writes its results
+// to the DB/storage, and returns the name of the next stage (or null when the
+// session is ready). Rendering is Phase 5.
+
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  db,
+  downloadTo,
+  uploadFrom,
+  uploadJson,
+  downloadJson,
+} from "./supabase.js";
+import {
+  probe,
+  extractAudioWav,
+  sampleFrames,
+  posterFrame,
+  ffmpegRun,
+} from "./ffmpeg.js";
+import { askClaude, imageBlock, extractJson } from "./claude.js";
+import { scorePiece } from "./scorecard.js";
+import { coachMemory } from "./memory.js";
+import { fingerprintAll } from "./fingerprint.js";
+import {
+  planCleanup,
+  chunks,
+  artifactPath,
+  RAW_RETENTION_DAYS,
+  SKIPPED_RETENTION_DAYS,
+  APPROVED_RETENTION_DAYS,
+} from "./retention.js";
+
+const MOMENT_TYPES = [
+  "teaching",
+  "hype",
+  "transformation",
+  "story",
+  "funny",
+  "technique",
+];
+
+// artifactPath now lives in retention.js and is imported above. ingest writes
+// these files and cleanup deletes them, so the two must agree on the path — and
+// two copies of the same rule is how they stop agreeing.
+
+async function withTmp(fn) {
+  const dir = await mkdtemp(join(tmpdir(), "sideline-"));
+  try {
+    return await fn(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function loadAssets(sessionId) {
+  const { data, error } = await db
+    .from("media_assets")
+    .select("*")
+    .eq("session_id", sessionId)
+    .eq("kind", "raw");
+  if (error) throw new Error(`load assets: ${error.message}`);
+  if (!data?.length) throw new Error("session has no uploaded videos");
+  return data;
+}
+
+async function loadCoach(session) {
+  const { data, error } = await db
+    .from("coaches")
+    .select("*")
+    .eq("id", session.coach_id)
+    .single();
+  if (error) throw new Error(`load coach: ${error.message}`);
+  return data;
+}
+
+/* ——— Stage 1: probe every raw video, extract clean audio ——— */
+export async function ingest({ session }) {
+  const assets = await loadAssets(session.id);
+  for (const asset of assets) {
+    await withTmp(async (dir) => {
+      const local = await downloadTo(asset.storage_path, join(dir, "in.mp4"));
+      const info = await probe(local);
+      await db
+        .from("media_assets")
+        .update({
+          duration_sec: info.duration,
+          width: info.width,
+          height: info.height,
+        })
+        .eq("id", asset.id);
+      if (info.hasAudio) {
+        const wav = await extractAudioWav(local, join(dir, "audio.wav"));
+        await uploadFrom(wav, artifactPath(asset, "wav"), "audio/wav");
+      }
+    });
+  }
+  return "direct";
+}
+
+/* ——— Stage: the DIRECTOR — looks at the footage + coach + optional prompt
+   and writes the session's content plan. This is the brain: it decides what
+   kinds of pieces to make, clusters same-drill videos, and hands the plan to
+   the composer. Runs after ingest, before transcribe. ——— */
+const clamp01 = (n) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
+const clampNum = (n, lo, hi, dflt) =>
+  Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
+
+// Which version of each prompt built this piece — computed, not remembered.
+//
+// This replaces a hand-maintained PROMPT_VERSIONS map ({director: 2, compose:
+// 1, ...}). That map was only correct as long as someone remembered to bump it,
+// and the failure was silent in the worst direction available: a forgotten bump
+// does not blank the column, it stamps the OLD version onto a NEW prompt. Two
+// different prompts then share a version number, every comparison drawn from
+// them is wrong, and nothing in the data hints at it.
+//
+// Now each stage's version is an 8-character hash of the source of the function
+// that builds its prompt. Reword an instruction and the hash moves on its own;
+// change nothing and it holds steady. There is no step left to forget.
+//
+// Evaluated once at module load. Function declarations are hoisted, so naming
+// the builders here — above where they appear in the file — is fine. See
+// fingerprint.js for why we hash the builder rather than the finished prompt,
+// and for what this intentionally over-reports.
+//
+// The old integer columns still hold the hand-set version of every piece made
+// before 2026-10-02. They are left alone: history, not a running total.
+export const PROMPT_FINGERPRINTS = fingerprintAll({
+  director: direct,
+  compose: composePlannedPiece,
+  revise,
+  reflect,
+});
+
+// Everything Phase 3 added to content_pieces that is a MEASUREMENT rather
+// than the piece itself. If a migration hasn't been run, one of these columns
+// is missing and the whole write fails — so every write can fall back to the
+// piece without them. The coach's reel matters more than our telemetry.
+const TELEMETRY_FIELDS = [
+  "flags",
+  "director_prompt_version",
+  "compose_prompt_version",
+  "revise_prompt_version",
+  "director_prompt_fp",
+  "compose_prompt_fp",
+  "revise_prompt_fp",
+];
+const withoutTelemetry = (row) => {
+  const core = { ...row };
+  for (const k of TELEMETRY_FIELDS) delete core[k];
+  return core;
+};
+
+// A piece shorter than this is a glitch, not a reel.
+const MIN_PIECE_SEC = 6;
+// Gap between one caption leaving the screen and the next arriving.
+const CAPTION_GAP = 0.15;
+// Below this a caption is on screen too briefly to read.
+const MIN_CAPTION_SEC = 0.6;
+
+// Put the caption beats in order and guarantee only ONE is ever on screen.
+//
+// The hook burns at 54px and wraps to as many as three lines, which reaches
+// well past the line where body captions sit — so any two captions alive at
+// the same instant print on top of each other. Rather than move the text
+// (which would change how every reel looks), make the overlap impossible:
+// sort by start time and clip each caption to end before the next begins.
+// Anything squeezed below MIN_CAPTION_SEC is dropped rather than flashed.
+export function orderCaptions(raw, totalDur) {
+  const list = (Array.isArray(raw) ? raw : [])
+    .filter((c) => c && c.text)
+    .map((c) => ({
+      text: String(c.text).slice(0, 80),
+      t0: Math.max(0, Math.min(Number(c.t0) || 0, totalDur)),
+      t1: Math.max(0, Math.min(Number(c.t1) || 0, totalDur)),
+      style: c.style === "hook" ? "hook" : "body",
+    }))
+    .filter((c) => c.t1 > c.t0)
+    .sort((a, b) => a.t0 - b.t0 || a.t1 - b.t1);
+
+  const kept = [];
+  for (const c of list) {
+    const prev = kept[kept.length - 1];
+    if (prev && c.t0 < prev.t1) {
+      const clipped = c.t0 - CAPTION_GAP;
+      // Making room for this beat would leave the one already on screen too
+      // brief to read. The earlier beat wins — it is usually the hook, and a
+      // reel that loses its hook is worse than one that loses a body line.
+      if (clipped - prev.t0 < MIN_CAPTION_SEC) continue;
+      prev.t1 = clipped;
+    }
+    kept.push(c);
+  }
+  return kept.filter((c) => c.t1 - c.t0 >= MIN_CAPTION_SEC);
+}
+
+const DIRECTOR_SCHEMA = [
+  "Return ONE JSON object, nothing else, with EXACTLY these fields:",
+  "{",
+  '  "read_of_footage": "2-4 sentences: what is in the videos and how they',
+  "    relate — same drill or different? multiple camera angles of the SAME",
+  '    action, or one angle each? any progression/story across the clips?",',
+  '  "clusters": [',
+  '    {"cluster_id": "c1", "label": "short human label e.g. sled push drill",',
+  '     "video_ids": ["<the EXACT asset_id of each video in this group>"],',
+  '     "angle_variety_score": 0.0}',
+  "  ],",
+  '  "director_notes": "one short paragraph in the coach\'s voice: what you are',
+  '    going to make and why, given the footage and their request",',
+  '  "planned_pieces": [',
+  "    {",
+  '      "piece_id": "p1",',
+  '      "kind": "one of: single, montage, teaching, transformation,',
+  "        testimonial, pov, story, funny_moment — or a close variant that",
+  '        fits the footage better",',
+  '      "cluster_ids_to_use": ["c1"],   // [] means any footage will do',
+  '      "target_length_sec": 25,        // 15-45',
+  '      "structural_recipe": "human-readable shot plan the editor follows,',
+  "        e.g. hook (1s) -> wide establishing -> tight punch on the payoff ->",
+  "        outro; OR A/B/A multi-angle cut between two clips of the same rep;",
+  '        OR montage of 6 fast beats across all clips",',
+  '      "why_this_piece": "ONE line, coach\'s voice, why this piece deserves',
+  '        to exist for their mission/request"',
+  "    }",
+  "  ]",
+  "}",
+  "",
+  "HARD RULES:",
+  "- angle_variety_score = how many DIFFERENT camera angles of the SAME action",
+  "  exist in a cluster. One angle only = 0.0-0.3. Two clear angles of the",
+  "  same rep = 0.5+.",
+  "- A teaching or multi-angle piece REQUIRES a cluster with",
+  "  angle_variety_score >= 0.4. If NO cluster reaches that, DO NOT plan one —",
+  "  plan something the footage can actually deliver (single, montage, story).",
+  "- Never plan more pieces than the footage supports. Two short single-angle",
+  "  clips → 1-2 pieces, not 5. Normally 3-5 pieces when the footage allows.",
+  "- If the coach gave a request, it OVERRIDES variety — make what they asked.",
+  "- If no request, make a VARIED pack — do not repeat the same kind.",
+  "- EVERY piece MUST have a real why_this_piece (no empty strings).",
+  "- Use the EXACT asset_id strings shown above. Never invent ids.",
+].join("\n");
+
+function normalizePlan(raw, assets) {
+  const ids = new Set(assets.map((a) => a.id));
+  const clusters = (Array.isArray(raw?.clusters) ? raw.clusters : [])
+    .map((c, i) => ({
+      cluster_id: String(c?.cluster_id || `c${i + 1}`),
+      label: String(c?.label || "clip").slice(0, 80),
+      video_ids: (Array.isArray(c?.video_ids) ? c.video_ids : []).filter((v) =>
+        ids.has(v),
+      ),
+      angle_variety_score: clamp01(Number(c?.angle_variety_score)),
+    }))
+    .filter((c) => c.video_ids.length);
+  const clusterIds = new Set(clusters.map((c) => c.cluster_id));
+
+  // How many seconds of footage each cluster actually holds. A piece cannot
+  // run longer than the video it is made from without replaying something —
+  // which is precisely how a 17.1s clip given a 30s target produced a reel
+  // that showed the same action twice. No prompt can fix that; the length has
+  // to be possible before the editor is asked for it.
+  const durationOf = Object.fromEntries(
+    assets.map((a) => [a.id, Number(a.duration_sec) || 0]),
+  );
+  const clusterSeconds = Object.fromEntries(
+    clusters.map((c) => [
+      c.cluster_id,
+      c.video_ids.reduce((sum, v) => sum + (durationOf[v] ?? 0), 0),
+    ]),
+  );
+  const allSeconds = assets.reduce(
+    (sum, a) => sum + (Number(a.duration_sec) || 0),
+    0,
+  );
+  const footageFor = (clusterIdsUsed) =>
+    clusterIdsUsed.length
+      ? clusterIdsUsed.reduce((sum, c) => sum + (clusterSeconds[c] ?? 0), 0)
+      : allSeconds;
+
+  const maxPieces = Math.max(1, Math.min(5, assets.length + 2));
+  let pieces = (Array.isArray(raw?.planned_pieces) ? raw.planned_pieces : [])
+    .map((p, i) => ({
+      piece_id: String(p?.piece_id || `p${i + 1}`),
+      kind:
+        String(p?.kind || "single")
+          .toLowerCase()
+          .replace(/[^a-z_]/g, "")
+          .slice(0, 40) || "single",
+      cluster_ids_to_use: (Array.isArray(p?.cluster_ids_to_use)
+        ? p.cluster_ids_to_use
+        : []
+      ).filter((c) => clusterIds.has(c)),
+      target_length_sec: clampNum(Number(p?.target_length_sec), 10, 45, 25),
+      structural_recipe: String(p?.structural_recipe || "").slice(0, 600),
+      why_this_piece: String(p?.why_this_piece || "").slice(0, 300),
+    }))
+    .slice(0, maxPieces);
+
+  if (!pieces.length) {
+    pieces = [
+      {
+        piece_id: "p1",
+        kind: assets.length > 1 ? "montage" : "single",
+        cluster_ids_to_use: [],
+        target_length_sec: 25,
+        structural_recipe:
+          "hook on the strongest moment → the action → the payoff → outro",
+        why_this_piece: "The best moment from today's footage, cut clean.",
+      },
+    ];
+  }
+  for (const p of pieces) {
+    if (!p.why_this_piece)
+      p.why_this_piece = "A strong piece from today's session.";
+
+    // Never ask for more seconds than the assigned footage contains. The floor
+    // of 8s stops a very short clip from producing a target the composer will
+    // reject outright — it would rather build a short piece than none.
+    const available = footageFor(p.cluster_ids_to_use);
+    if (available > 0) {
+      const possible = Math.max(8, Math.floor(available));
+      if (p.target_length_sec > possible) {
+        console.log(
+          `  ${p.piece_id}: target ${p.target_length_sec}s trimmed to ${possible}s — its clips only hold ${available.toFixed(1)}s`,
+        );
+        p.target_length_sec = possible;
+      }
+    }
+  }
+
+  return {
+    read_of_footage: String(raw?.read_of_footage || "").slice(0, 900),
+    clusters,
+    director_notes: String(raw?.director_notes || "").slice(0, 900),
+    planned_pieces: pieces,
+  };
+}
+
+export async function direct({ session }) {
+  const assets = await loadAssets(session.id);
+  const coach = await loadCoach(session);
+  // Scrape the coach's Instagram HERE, not in compose.
+  //
+  // It used to run at compose time, which is after this stage — so on a coach's
+  // very first session the director planned the whole pack having been told
+  // "Instagram brand: not scanned", and only sessions from the second onwards
+  // benefited. The first session is exactly the one where the director knows
+  // least about them and the brand summary is worth most.
+  //
+  // compose re-reads the coach row, so it still gets the summary from here.
+  // Costs one scrape on the first session only; afterwards IG_RESCAN_MS makes
+  // this a no-op.
+  await ensureIgProfile(coach);
+  const prompt = String(session.prompt ?? session.brief ?? "").trim();
+  const framesPer = assets.length > 4 ? 3 : 4;
+
+  const content = [
+    {
+      type: "text",
+      text:
+        "You are the creative DIRECTOR. Below are a few frames sampled from " +
+        "each video the coach just uploaded. Decide what short-form pieces to " +
+        "make. Study the frames carefully before planning.",
+    },
+  ];
+
+  for (let i = 0; i < assets.length; i++) {
+    const a = assets[i];
+    await withTmp(async (dir) => {
+      const local = await downloadTo(a.storage_path, join(dir, "in.mp4"));
+      const frames = await sampleFrames(local, a.duration_sec, dir, framesPer);
+      content.push({
+        type: "text",
+        text: `VIDEO ${i + 1} — asset_id: ${a.id} — duration: ${
+          a.duration_sec ? a.duration_sec.toFixed(1) : "?"
+        }s`,
+      });
+      for (const f of frames) {
+        content.push({ type: "text", text: `  frame at t=${f.t}s:` });
+        content.push(await imageBlock(f.path));
+      }
+    });
+  }
+
+  content.push({
+    type: "text",
+    text: [
+      "THE COACH:",
+      `- sport / focus: ${coach.sport ?? "?"}`,
+      `- audience: ${coach.audience ?? "?"}`,
+      `- mission right now: ${coach.mission ?? "?"}`,
+      `- based in: ${[coach.city, coach.state].filter(Boolean).join(", ") || "not set"}`,
+      coach.ig_profile
+        ? `- their Instagram brand: ${String(coach.ig_profile).slice(0, 800)}`
+        : "- Instagram brand: not scanned",
+    ].join("\n"),
+  });
+
+  // Phase 3.6 — what this coach has actually responded to. Placed AFTER their
+  // profile and BEFORE this upload's request, so history informs the plan but
+  // never outranks what they asked for today. Empty string for a coach with no
+  // history, which drops the section entirely rather than showing a blank one.
+  const memory = await coachMemory(db, coach.id);
+  if (memory) {
+    console.log(`  coach memory: ${memory.split("\n").length} lines`);
+    content.push({ type: "text", text: memory });
+  }
+
+  content.push({
+    type: "text",
+    text: prompt
+      ? `THE COACH'S REQUEST FOR THIS UPLOAD (TOP PRIORITY — honor it above everything): "${prompt.slice(
+          0,
+          500,
+        )}"`
+      : "THE COACH GAVE NO REQUEST — you decide. Build a VARIED pack that serves their mission; mix the kinds, don't repeat one kind.",
+  });
+
+  content.push({ type: "text", text: DIRECTOR_SCHEMA });
+
+  const reply = await askClaude({
+    system:
+      "You are a world-class short-form video creative director for sports " +
+      "coaches. You reply with exactly one JSON object and no other text.",
+    content,
+    maxTokens: 4000,
+  });
+  const plan = normalizePlan(extractJson(reply), assets);
+
+  const { error: planErr } = await db
+    .from("sessions")
+    .update({ plan })
+    .eq("id", session.id);
+  if (planErr) throw new Error(`save plan: ${planErr.message}`);
+
+  // Tag each asset with the cluster the director assigned it.
+  const clusterOf = {};
+  for (const c of plan.clusters)
+    for (const vid of c.video_ids)
+      clusterOf[vid] = { id: c.cluster_id, label: c.label };
+  for (const a of assets) {
+    const c = clusterOf[a.id];
+    if (c) {
+      const { error: tagErr } = await db
+        .from("media_assets")
+        .update({ cluster_id: c.id, cluster_label: c.label })
+        .eq("id", a.id);
+      if (tagErr)
+        console.warn(`  cluster tag failed ${a.id}: ${tagErr.message}`);
+    }
+  }
+
+  console.log(
+    `  directed ${plan.planned_pieces.length} piece(s) from ${assets.length} video(s)`,
+  );
+  return "transcribe";
+}
+
+/* ——— Stage 2: Deepgram → word-level timestamps ——— */
+export async function transcribe({ session }) {
+  const key = process.env.DEEPGRAM_API_KEY;
+  const assets = await loadAssets(session.id);
+  for (const asset of assets) {
+    let transcript = { text: "", words: [] };
+    if (key) {
+      try {
+        const wav = await withTmp(async (dir) => {
+          const p = join(dir, "audio.wav");
+          await downloadTo(artifactPath(asset, "wav"), p);
+          const { readFile } = await import("node:fs/promises");
+          return readFile(p);
+        });
+        const res = await fetch(
+          "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Token ${key}`,
+              "Content-Type": "audio/wav",
+            },
+            body: wav,
+          },
+        );
+        if (!res.ok) throw new Error(`deepgram ${res.status}`);
+        const json = await res.json();
+        const alt = json?.results?.channels?.[0]?.alternatives?.[0];
+        transcript = {
+          text: alt?.transcript ?? "",
+          words: (alt?.words ?? []).map((w) => ({
+            w: w.punctuated_word ?? w.word,
+            s: w.start,
+            e: w.end,
+          })),
+        };
+      } catch (e) {
+        // Silent footage or transcription hiccup — the vision pass can still
+        // find moments; don't fail the whole session.
+        console.warn(`transcribe asset ${asset.id}: ${e.message}`);
+      }
+    }
+    await uploadJson(transcript, artifactPath(asset, "transcript.json"));
+  }
+  return "understand";
+}
+
+/* ——— Stage 3: Claude with vision finds the moments ——— */
+export async function understand({ session }) {
+  const assets = await loadAssets(session.id);
+  const coach = await loadCoach(session);
+
+  // Per-clip progress. This stage used to print nothing at all between "→
+  // understand…" and the next stage, so a worker hung inside it looked exactly
+  // like a worker doing careful work — 17 minutes of silence, with no way to
+  // tell which. One line per clip makes a stall visible while it is happening
+  // instead of after someone goes looking in the database.
+  let clipNo = 0;
+  for (const asset of assets) {
+    clipNo++;
+    console.log(
+      `  clip ${clipNo}/${assets.length} (${asset.duration_sec?.toFixed?.(1) ?? "?"}s) — sampling frames…`,
+    );
+    const transcript = await downloadJson(
+      artifactPath(asset, "transcript.json"),
+    ).catch(() => ({ text: "", words: [] }));
+
+    const moments = await withTmp(async (dir) => {
+      const local = await downloadTo(asset.storage_path, join(dir, "in.mp4"));
+      const frames = await sampleFrames(local, asset.duration_sec, dir, 40);
+      console.log(`  clip ${clipNo}/${assets.length} — ${frames.length} frames, asking Claude…`);
+      const content = [];
+      for (const f of frames) {
+        content.push({ type: "text", text: `Frame at t=${f.t}s:` });
+        content.push(await imageBlock(f.path));
+      }
+      const words = transcript.words
+        .map((w) => `[${w.s?.toFixed?.(1)}] ${w.w}`)
+        .join(" ");
+      content.push({
+        type: "text",
+        text: [
+          `You are analyzing raw training footage for a sports coach.`,
+          `Coach profile: sport=${coach.sport ?? "?"}; audience=${coach.audience ?? "?"}; mission=${coach.mission ?? "?"}.`,
+          (session.prompt ?? session.brief)
+            ? `THE COACH'S NOTE FOR THIS SESSION (top priority, honor it): "${String(session.prompt ?? session.brief).slice(0, 500)}"`
+            : ``,
+          `Video duration: ${asset.duration_sec ?? "unknown"}s.`,
+          `Transcript with word start-times in seconds:`,
+          words || "(no speech detected)",
+          ``,
+          `Find the 2-5 strongest moments for short-form social content.`,
+          `HARD RULES:`,
+          `- Every moment is a COMPLETE arc: setup, action, OUTCOME. Never end`,
+          `  before the payoff — if someone shoots, scores, finishes a rep,`,
+          `  lands a combo, or a drill resolves, the outcome AND about 2 seconds`,
+          `  of reaction after it belong INSIDE the moment. A clip that cuts`,
+          `  before the ball lands is worthless.`,
+          `- Frames are ~1.5-2s apart, so if action is building in the last`,
+          `  frame you can see, extend t_end past it rather than guessing short.`,
+          `- Mix lengths: short highlights (6-15s) AND longer teaching/story`,
+          `  segments (20-45s) when the footage supports them. Do not return`,
+          `  only sub-10s clips.`,
+          `- 4-45 seconds each, within the video's duration.`,
+          `Return ONLY a JSON array, no other text:`,
+          `[{"t_start": 7.5, "t_end": 20.8, "type": "teaching|hype|transformation|story|funny|technique",`,
+          `  "score": 0.0-1.0, "reason": "one sentence", "hook_idea": "short hook"}]`,
+        ].join("\n"),
+      });
+
+      const reply = await askClaude({
+        system:
+          "You are Sideline's footage analyst. You only ever reply with valid JSON.",
+        content,
+      });
+      return extractJson(reply);
+    });
+
+    const valid = (Array.isArray(moments) ? moments : [])
+      .filter(
+        (m) =>
+          Number.isFinite(m.t_start) &&
+          Number.isFinite(m.t_end) &&
+          m.t_end > m.t_start &&
+          MOMENT_TYPES.includes(m.type),
+      )
+      .map((m) => ({
+        session_id: session.id,
+        asset_id: asset.id,
+        // Pad both ends: sampling is coarse, and reactions sell the moment.
+        t_start: Math.max(0, m.t_start - 0.75),
+        t_end: asset.duration_sec
+          ? Math.min(m.t_end + 2, asset.duration_sec)
+          : m.t_end + 2,
+        type: m.type,
+        score: Math.max(0, Math.min(1, Number(m.score) || 0)),
+        reason: String(m.reason ?? "").slice(0, 500),
+        transcript_span: transcript.words
+          .filter((w) => w.s >= m.t_start && w.e <= m.t_end)
+          .map((w) => w.w)
+          .join(" ")
+          .slice(0, 1000),
+      }));
+
+    if (valid.length) {
+      const { error } = await db.from("moments").insert(valid);
+      if (error) throw new Error(`insert moments: ${error.message}`);
+    }
+    // Closes the loop on this clip. A count of 0 here is itself worth seeing:
+    // a clip that yields no moments gives the composer nothing to cut from.
+    console.log(
+      `  clip ${clipNo}/${assets.length} — ${valid.length} moment(s) found`,
+    );
+  }
+  return "compose";
+}
+
+// Scan the coach's public Instagram (needs APIFY_TOKEN) and distill it into a
+// brand brief the writers use. Re-scans when the last scan is missing or older
+// than 30 days so the brief stays current. Fails soft — no scan, no problem,
+// and a failed scan leaves scanned_at untouched so the next session retries.
+const IG_RESCAN_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+async function ensureIgProfile(coach) {
+  if (!coach.ig_handle || !process.env.APIFY_TOKEN) return;
+  const scannedMs = coach.scanned_at ? new Date(coach.scanned_at).getTime() : 0;
+  if (scannedMs && Date.now() - scannedMs < IG_RESCAN_MS) return; // fresh enough
+  try {
+    const handle = String(coach.ig_handle).replace(/^@/, "").trim();
+    const res = await fetch(
+      `https://api.apify.com/v2/acts/apify~instagram-profile-scraper/run-sync-get-dataset-items?token=${process.env.APIFY_TOKEN}&timeout=120`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ usernames: [handle] }),
+      },
+    );
+    if (!res.ok) throw new Error(`apify ${res.status}`);
+    const items = await res.json();
+    const p = Array.isArray(items) ? items[0] : null;
+    if (!p) throw new Error("profile not found");
+    const posts = (p.latestPosts ?? []).slice(0, 12).map((x) => ({
+      caption: String(x.caption ?? "").slice(0, 300),
+      likes: x.likesCount,
+      comments: x.commentsCount,
+      type: x.type,
+    }));
+    const reply = await askClaude({
+      system:
+        "You distill social profiles into concise brand briefs for ghostwriters. Reply with plain text only.",
+      content: [
+        {
+          type: "text",
+          text: [
+            `Summarize this coach's Instagram in under 180 words for a ghostwriter:`,
+            `what they post, caption style (length, emoji use, phrasing),`,
+            `recurring themes, and which posts perform best and why.`,
+            `Bio: ${p.biography ?? ""}`,
+            `Followers: ${p.followersCount ?? "?"}`,
+            `Recent posts: ${JSON.stringify(posts)}`,
+          ].join("\n"),
+        },
+      ],
+      maxTokens: 600,
+    });
+    const summary = reply.trim().slice(0, 2000);
+    const scannedAt = new Date().toISOString();
+
+    // CHECK THE WRITE. It was not checked, and Supabase returns errors in the
+    // result object rather than throwing — so a failed save was invisible and
+    // the line below cheerfully logged "scanned IG @handle" anyway. Both coach
+    // rows had ig_profile null while the logs claimed success every session,
+    // which meant the director and composer never once saw a coach's real brand
+    // voice. We paid Apify for it and threw it away.
+    let { error: saveErr } = await db
+      .from("coaches")
+      .update({ ig_profile: summary, scanned_at: scannedAt })
+      .eq("id", coach.id);
+
+    // The summary is the point; scanned_at only decides when to re-scan. If
+    // that column is missing, keep the summary rather than losing both.
+    if (saveErr) {
+      ({ error: saveErr } = await db
+        .from("coaches")
+        .update({ ig_profile: summary })
+        .eq("id", coach.id));
+      if (!saveErr)
+        console.warn(
+          "  saved IG summary without scanned_at — run supabase/v6-ig-refresh.sql",
+        );
+    }
+    if (saveErr) throw new Error(`saving the summary failed: ${saveErr.message}`);
+
+    coach.ig_profile = summary;
+    coach.scanned_at = scannedAt;
+    console.log(`  scanned IG @${handle} — ${summary.length} chars saved`);
+  } catch (e) {
+    console.warn(`ig scan skipped: ${e.message}`);
+  }
+}
+
+
+// Word timings for the scorecard's speech checks, keyed by asset.
+//
+// Best effort on purpose. Transcripts are per-session artifacts that cleanup
+// removes once a session finishes, so on a revision they are usually gone — in
+// which case the speech checks simply do not fire. A missing transcript must
+// never invent a defect, and must never fail a stage.
+async function loadSpeech(assets) {
+  const speech = {};
+  for (const a of assets) {
+    const t = await downloadJson(artifactPath(a, "transcript.json")).catch(
+      () => null,
+    );
+    if (Array.isArray(t?.words) && t.words.length) speech[a.id] = t.words;
+  }
+  return Object.keys(speech).length ? speech : undefined;
+}
+
+/* ——— Stage 4: Claude writes each piece (EDL + copy) ——— */
+export async function compose({ session }) {
+  // The scan now happens in direct(), two stages earlier, so the director sees
+  // it too. loadCoach re-reads the row, so the summary is already here.
+  const coach = await loadCoach(session);
+  await ensureIgProfile(coach);
+  const assets = await loadAssets(session.id);
+  const byId = Object.fromEntries(assets.map((a) => [a.id, a]));
+  // Loaded once for the whole session rather than per piece.
+  const speech = await loadSpeech(assets);
+
+  const { data: allMoments, error } = await db
+    .from("moments")
+    .select("*")
+    .eq("session_id", session.id)
+    .gte("score", 0.4)
+    .order("score", { ascending: false });
+  if (error) throw new Error(`load moments: ${error.message}`);
+  if (!allMoments?.length) throw new Error("no usable moments found");
+
+  // The DIRECTOR's plan decides what to make; the composer no longer picks.
+  // Fall back to a single piece if a plan is somehow missing (old session).
+  const plan =
+    session.plan && Array.isArray(session.plan.planned_pieces)
+      ? session.plan
+      : {
+          clusters: [],
+          planned_pieces: [
+            {
+              piece_id: "p1",
+              kind: assets.length > 1 ? "montage" : "single",
+              cluster_ids_to_use: [],
+              target_length_sec: 25,
+              structural_recipe:
+                "hook on the strongest moment → the action → the payoff → outro",
+              why_this_piece: "The best of today's footage, cut clean.",
+            },
+          ],
+        };
+
+  const clusterAssets = {}; // cluster_id -> Set(asset_id)
+  for (const c of plan.clusters ?? [])
+    clusterAssets[c.cluster_id] = new Set(c.video_ids);
+
+  let made = 0;
+  for (const pp of plan.planned_pieces.slice(0, 6)) {
+    try {
+      const ok = await composePlannedPiece({
+        session,
+        coach,
+        byId,
+        allMoments,
+        pp,
+        clusterAssets,
+        speech,
+      });
+      if (ok) made++;
+    } catch (e) {
+      // One bad piece never sinks the rest of the pack.
+      console.warn(`  piece ${pp.piece_id} skipped: ${e.message}`);
+    }
+  }
+  if (!made) throw new Error("no planned piece could be composed");
+  return "render";
+}
+
+// Build ONE content piece from ONE of the director's planned pieces: pick the
+// moments from the piece's cluster(s), ask Claude to realize the structural
+// recipe as a concrete EDL + copy, extract a poster, and insert the piece.
+async function composePlannedPiece({
+  session,
+  coach,
+  byId,
+  allMoments,
+  pp,
+  clusterAssets,
+  speech,
+}) {
+  // Which moments may this piece draw from?
+  let pool = allMoments;
+  if (pp.cluster_ids_to_use?.length) {
+    const allowed = new Set();
+    for (const cid of pp.cluster_ids_to_use)
+      for (const aid of clusterAssets[cid] ?? []) allowed.add(aid);
+    const filtered = allMoments.filter((m) => allowed.has(m.asset_id));
+    if (filtered.length) pool = filtered;
+  }
+  pool = pool.slice(0, 16);
+  if (!pool.length) return false;
+
+  const momentList = pool
+    .map((m, i) => {
+      const a = byId[m.asset_id];
+      const landscape = (a?.width ?? 0) > (a?.height ?? 0);
+      return `#${i} · asset=${m.asset_id} · ${m.t_start.toFixed(
+        1,
+      )}s→${m.t_end.toFixed(1)}s (${(m.t_end - m.t_start).toFixed(1)}s) · ${
+        landscape ? "landscape" : "vertical"
+      } source · ${m.type} · ${m.reason} · said: "${(
+        m.transcript_span || "(no speech)"
+      ).slice(0, 200)}"`;
+    })
+    .join("\n");
+
+  const multi = String(pp.kind) !== "single";
+  const perSegCap = multi ? 6 : 60;
+  const target = clampNum(Number(pp.target_length_sec), 8, 60, 25);
+
+  const prompt = [
+    `You are the coach's editor + ghostwriter. Build the ONE piece the DIRECTOR asked for below.`,
+    `Coach: name=${coach.name}; sport=${coach.sport ?? "?"}; tones=${(
+      coach.tones ?? []
+    ).join(", ")}; audience=${coach.audience ?? "?"}; mission=${coach.mission ?? "?"}.`,
+    coach.voice_memo_transcript
+      ? `VOICE SAMPLE — copy STYLE only (tone, rhythm, word length), NEVER its topic or examples: "${coach.voice_memo_transcript.slice(
+          0,
+          900,
+        )}"`
+      : `(No voice memo — write plain, direct, no corporate tone.)`,
+    coach.ig_profile
+      ? `Their real Instagram vibe: ${String(coach.ig_profile).slice(0, 1200)}`
+      : ``,
+    ``,
+    `THE DIRECTOR'S BRIEF FOR THIS PIECE (follow it):`,
+    `- kind: ${pp.kind}`,
+    `- why it exists (keep this intent alive in the copy): ${pp.why_this_piece}`,
+    `- target length: ~${target}s`,
+    `- structural recipe to realize: ${pp.structural_recipe}`,
+    ``,
+    `Available moments — pick sub-ranges from INSIDE these (use the index numbers):`,
+    momentList,
+    ``,
+    multi
+      ? `Build ${
+          target < 20 ? "3-6" : "5-10"
+        } segments across the moments that realize the recipe. Each segment names the transition INTO the next: "cut" (hard cut, default), "fade" (mood shift), "slideleft"/"slideright" (whip to new angle), "circleopen" (reveal). Mostly cuts and fades; at most 1-2 specialty wipes.`
+      : `Build exactly ONE segment — a single clean cut that realizes the recipe (hook early, land the payoff).`,
+    `Aim for ~${target}s total, never over 60s. Multi-clip segments run 1-6s each; a single cut may run longer.`,
+    `Write the copy in the coach's voice, shaped by the kind and the intent above.`,
+    `The hook, the caption and every caption beat must describe the footage you ACTUALLY selected — the exercise that appears in your segments. Do NOT write about a moment you did not cut, and do not borrow words from a moment's speech unless that moment is in your segment list. A reel that talks about a different exercise than it shows is unusable.`,
+    `Caption beats land inside the cut (t=0 = cut start): a hook beat in the first 2-3s, then 1-3 body beats.`,
+    `Only ONE caption is on screen at a time — give each beat its own window, never overlapping.`,
+    ``,
+    `Return ONLY one JSON object:`,
+    `{"segments": [{"moment_index": 0, "in": <abs s>, "out": <abs s>, "transition": "cut"}],`,
+    ` "captions": [{"text":"HOOK.","t0":0,"t1":2.2,"style":"hook"},{"text":"body beat","t0":3,"t1":6,"style":"body"}],`,
+    ` "hook":"...", "caption":"1-4 sentences in the coach's voice", "hashtags":"#four #to #six #tags",`,
+    ` "cta":"aimed at the coach's mission", "suggested_slot":"Tue 6:00 PM",`,
+    ` "suggested_sound":"a style of trending sound, never a specific song"}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const reply = await askClaude({
+    system:
+      "You are an elite short-form sports video editor and ghostwriter. You realize the director's recipe precisely and reply with exactly one valid JSON object.",
+    content: [{ type: "text", text: prompt }],
+    maxTokens: 3000,
+  });
+  const draft = extractJson(reply);
+
+  const TRANSITIONS = ["cut", "fade", "slideleft", "slideright", "circleopen"];
+  let total = 0;
+  const segments = (Array.isArray(draft.segments) ? draft.segments : [])
+    .map((seg) => {
+      const m = pool[Number(seg.moment_index)];
+      if (!m) return null;
+      const a = byId[m.asset_id];
+      const lo = Math.max(0, m.t_start - 1);
+      const hi = Math.min(m.t_end + 1, a?.duration_sec ?? m.t_end + 1);
+      const start = Math.max(lo, Math.min(Number(seg.in), hi - 1));
+      const end = Math.min(
+        hi,
+        Math.max(start + 1, Math.min(Number(seg.out), start + perSegCap)),
+      );
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < 1)
+        return null;
+      return {
+        asset_id: m.asset_id,
+        in: start,
+        out: end,
+        transition: TRANSITIONS.includes(seg.transition)
+          ? seg.transition
+          : "cut",
+        // How far this shot could still run inside its own moment. Kept so a
+        // too-short piece can be lengthened before it is written off.
+        max_out: Math.min(hi, start + perSegCap),
+      };
+    })
+    .filter(Boolean)
+    .filter((seg) => {
+      if (total >= 60) return false;
+      total += seg.out - seg.in;
+      return true;
+    });
+  if (!segments.length) return false;
+
+  // Nothing used to stop a two-second reel from shipping as a finished piece.
+  // Before giving up on one, let the shots run further into the moments they
+  // already came from — the footage is there, the composer just asked for less
+  // of it.
+  if (total < MIN_PIECE_SEC) {
+    for (const seg of segments) {
+      if (total >= MIN_PIECE_SEC) break;
+      const room = seg.max_out - seg.out;
+      if (room <= 0.05) continue;
+      const take = Math.min(room, MIN_PIECE_SEC - total);
+      seg.out += take;
+      total += take;
+    }
+  }
+  for (const seg of segments) delete seg.max_out;
+
+  // Still too short: the footage genuinely isn't there. Skip the piece rather
+  // than hand the coach a two-second clip.
+  if (total < MIN_PIECE_SEC) {
+    console.log(
+      `    skipped ${pp.piece_id}: only ${total.toFixed(
+        1,
+      )}s of usable footage (minimum ${MIN_PIECE_SEC}s)`,
+    );
+    return false;
+  }
+
+  const captions = orderCaptions(draft.captions, total);
+
+  // Poster from the opening segment → media_assets(kind render).
+  const first = segments[0];
+  const firstAsset = byId[first.asset_id];
+  const folder = firstAsset.storage_path.split("/").slice(0, 2).join("/");
+  const posterStorage = `${folder}/posters/${session.id}-${pp.piece_id}.jpg`;
+  await withTmp(async (dir) => {
+    const local = await downloadTo(
+      firstAsset.storage_path,
+      join(dir, "in.mp4"),
+    );
+    const poster = await posterFrame(
+      local,
+      first.in + (first.out - first.in) / 2,
+      join(dir, "poster.jpg"),
+    );
+    await uploadFrom(poster, posterStorage, "image/jpeg");
+  });
+  const { data: posterAsset, error: posterErr } = await db
+    .from("media_assets")
+    .insert({
+      session_id: session.id,
+      storage_path: posterStorage,
+      kind: "render",
+    })
+    .select("id")
+    .single();
+  if (posterErr) throw new Error(`poster asset: ${posterErr.message}`);
+
+  const isMulti = segments.length > 1;
+  const edl = {
+    segments,
+    type: pp.kind,
+    crop: {
+      mode: isMulti ? "center" : "eased",
+      start_x_frac: 0.5,
+    },
+    captions,
+    poster_asset_id: posterAsset.id,
+    // Carried so a revision can re-score the piece against the same target the
+    // director set. Nothing in render reads it.
+    target_length_sec: target,
+  };
+  // Score the piece before it can reach the coach. Flags are a record of what
+  // the structure looks like, not a gate — nothing is blocked on them.
+  const flags = scorePiece({
+    edl,
+    hook: draft.hook,
+    targetLengthSec: target,
+    speech,
+  });
+  if (flags.length)
+    console.log(`    ${pp.piece_id} flags: ${flags.join(", ")}`);
+
+  const row = {
+    session_id: session.id,
+    format: "reel",
+    edl,
+    flags,
+    // Null until the render stage produces the mp4 — never the poster JPG.
+    render_asset_id: null,
+    piece_kind: String(pp.kind).slice(0, 40),
+    director_intent: String(pp.why_this_piece || "").slice(0, 500),
+    hook: String(draft.hook ?? "").slice(0, 200),
+    caption: String(draft.caption ?? "").slice(0, 2000),
+    hashtags: String(draft.hashtags ?? "").slice(0, 300),
+    cta: String(draft.cta ?? "").slice(0, 300),
+    why: String(pp.why_this_piece ?? draft.why ?? "").slice(0, 500),
+    suggested_slot: String(draft.suggested_slot ?? "").slice(0, 40),
+    suggested_sound: String(draft.suggested_sound ?? "").slice(0, 120),
+    status: "ready",
+    // Which prompts built this piece. Derived from the builders' source, so
+    // these cannot fall out of step with the prompts actually used.
+    director_prompt_fp: PROMPT_FINGERPRINTS.director,
+    compose_prompt_fp: PROMPT_FINGERPRINTS.compose,
+  };
+
+  let { error: insErr } = await db.from("content_pieces").insert(row);
+  // Telemetry must never be able to cost a coach their reels. If any Phase 3
+  // migration hasn't been run, that column is missing and the WHOLE insert
+  // fails — so drop every optional field and save the piece itself.
+  if (insErr) {
+    console.warn(
+      `  telemetry not saved (${insErr.message}) — a Phase 3 migration is missing`,
+    );
+    ({ error: insErr } = await db
+      .from("content_pieces")
+      .insert(withoutTelemetry(row)));
+  }
+  if (insErr) throw new Error(`insert piece: ${insErr.message}`);
+  return true;
+}
+
+/* ——— Stage 5: render each EDL deterministically (SPEC recipe) ———
+   Handles single cuts AND multi-video montages: every piece is a list of
+   segments (a single cut = one segment). Each segment is normalized to
+   1080x1920@30 with uniform audio, then one final pass concatenates them
+   and burns captions, fades, and loudness normalization. */
+const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+
+// The burn-in font (DejaVu Sans Bold) has no emoji/pictograph glyphs, and
+// drawtext renders any missing glyph as a "tofu" box (□). Social copy ends
+// sentences with emoji constantly, so strip anything the font can't draw
+// before it reaches the video. Normal punctuation, curly quotes, em dashes
+// and accented Latin all survive.
+function sanitizeForBurn(text) {
+  return String(text)
+    .replace(
+      /[\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}\u{2300}-\u{23FF}\u{2500}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{200D}]/gu,
+      "",
+    )
+    .replace(/\s+([,.!?;:])/g, "$1") // no space left dangling before punctuation
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+// drawtext has no auto-wrap: break captions into up to 3 fitted lines.
+function wrapText(text, maxChars) {
+  const words = sanitizeForBurn(text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = "";
+  for (const w of words) {
+    if (line && (line + " " + w).length > maxChars) {
+      lines.push(line);
+      line = w;
+    } else {
+      line = line ? line + " " + w : w;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 3).join("\n");
+}
+
+// Crop/scale a source to 1080x1920 given its displayed dimensions.
+function geometryFilter(srcW, srcH, crop) {
+  if (srcW > srcH) {
+    const cw = Math.floor((srcH * 9) / 16 / 2) * 2;
+    const center = Math.round((srcW - cw) / 2);
+    const rawStart = Math.round((crop?.start_x_frac ?? 0.5) * srcW - cw / 2);
+    const startX = Math.max(0, Math.min(rawStart, srcW - cw));
+    const xExpr =
+      crop?.mode === "eased" && startX !== center
+        ? `'if(lt(t,3),${startX}+(${center}-${startX})*t/3,${center})'`
+        : String(center);
+    return `crop=${cw}:${srcH}:${xExpr}:0,scale=1080:1920`;
+  }
+  return "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920";
+}
+
+// Captions + fades for the final pass over the assembled timeline.
+function overlayFilter({ edl, totalDur, accentHex, dir, writeFileSync }) {
+  const parts = ["format=yuv420p"];
+  parts.push(
+    "fade=t=in:st=0:d=0.35",
+    `fade=t=out:st=${Math.max(0, totalDur - 0.35).toFixed(2)}:d=0.35`,
+  );
+  const accent = "0x" + (accentHex || "#C8102E").replace("#", "");
+  (edl.captions ?? []).forEach((c, i) => {
+    const txt = join(dir, `cap${i}.txt`);
+    const hook = c.style === "hook";
+    writeFileSync(txt, wrapText(c.text, hook ? 20 : 28));
+    const common = `fontfile=${FONT}:textfile=${txt}:x=(w-text_w)/2:line_spacing=10:enable='between(t,${c.t0},${c.t1})'`;
+    if (hook) {
+      parts.push(
+        `drawtext=${common}:fontcolor=white:fontsize=54:box=1:boxcolor=${accent}:boxborderw=20:y=1380`,
+      );
+    } else {
+      parts.push(
+        `drawtext=${common}:fontcolor=white:fontsize=42:borderw=6:bordercolor=black@0.55:y=1470`,
+      );
+    }
+  });
+  return parts.join(",");
+}
+
+// Intermediate segments stay local — speed over size.
+const ENC_SEG = [
+  "-c:v",
+  "libx264",
+  "-preset",
+  "ultrafast",
+  "-crf",
+  "18",
+  "-r",
+  "30",
+];
+// Final output gets uploaded — compress properly and cap the bitrate so a
+// 60s reel can never exceed the storage tier's 50MB per-file limit.
+const ENC_FINAL = [
+  "-c:v",
+  "libx264",
+  "-preset",
+  "veryfast",
+  "-threads",
+  "2",
+  "-crf",
+  "21",
+  "-maxrate",
+  "6M",
+  "-bufsize",
+  "12M",
+  "-r",
+  "30",
+];
+
+export async function render({ session }) {
+  const { writeFileSync } = await import("node:fs");
+  const coach = await loadCoach(session);
+  const assets = await loadAssets(session.id);
+  const byId = Object.fromEntries(assets.map((a) => [a.id, a]));
+
+  const { data: pieces, error } = await db
+    .from("content_pieces")
+    .select("*")
+    .eq("session_id", session.id)
+    .in("status", ["rendering", "ready", "approved", "downloaded"]);
+  if (error) throw new Error(`load pieces: ${error.message}`);
+
+  const { data: renderAssets } = await db
+    .from("media_assets")
+    .select("id, storage_path")
+    .eq("session_id", session.id)
+    .eq("kind", "render");
+  const assetPath = Object.fromEntries(
+    (renderAssets ?? []).map((a) => [a.id, a.storage_path]),
+  );
+
+  for (const piece of pieces ?? []) {
+    const edl = piece.edl;
+    if (!edl) continue;
+    // Only pieces awaiting a render (fresh or revised) get re-rendered; to
+    // force a full re-render, set piece statuses to 'rendering' first.
+    const hasVideo =
+      piece.render_asset_id &&
+      assetPath[piece.render_asset_id]?.endsWith(".mp4");
+    if (piece.status !== "rendering" && hasVideo) continue;
+    // Normalize: a single cut is a one-segment montage.
+    const segments = (
+      edl.segments?.length
+        ? edl.segments
+        : [{ asset_id: edl.asset_id, in: edl.in, out: edl.out }]
+    ).filter(
+      (seg) =>
+        seg?.asset_id &&
+        byId[seg.asset_id] &&
+        Number.isFinite(seg.in) &&
+        Number.isFinite(seg.out) &&
+        seg.out > seg.in,
+    );
+    if (!segments.length) continue;
+
+    await withTmp(async (dir) => {
+      // Download each distinct source once.
+      const local = {};
+      const info = {};
+      for (const seg of segments) {
+        if (!local[seg.asset_id]) {
+          local[seg.asset_id] = await downloadTo(
+            byId[seg.asset_id].storage_path,
+            join(dir, `src-${seg.asset_id}.mp4`),
+          );
+          info[seg.asset_id] = await probe(local[seg.asset_id]);
+        }
+      }
+
+      // Pass 1: normalize every segment (uniform video + audio).
+      const segFiles = [];
+      for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        const inf = info[seg.asset_id];
+        const dur = seg.out - seg.in;
+        const out = join(dir, `seg${i}.mp4`);
+        const geo = geometryFilter(
+          inf.width ?? 1920,
+          inf.height ?? 1080,
+          seg.crop ?? edl.crop,
+        );
+        const args = [
+          "-y",
+          "-ss",
+          String(seg.in),
+          "-t",
+          String(dur),
+          "-i",
+          local[seg.asset_id],
+        ];
+        if (!inf.hasAudio) {
+          args.push(
+            "-f",
+            "lavfi",
+            "-t",
+            String(dur),
+            "-i",
+            "anullsrc=r=48000:cl=stereo",
+          );
+          args.push("-map", "0:v:0", "-map", "1:a:0");
+        }
+        args.push("-vf", `${geo},fps=30,format=yuv420p`);
+        args.push("-ar", "48000", "-ac", "2", "-c:a", "aac", "-b:a", "128k");
+        args.push(...ENC_SEG, "-shortest", out);
+        await ffmpegRun(args);
+        segFiles.push(out);
+      }
+      // Pass 2: join with transitions, then captions + fades + loudnorm.
+      const XFADE = {
+        cut: ["fade", 0.06], // imperceptible — reads as a hard cut
+        fade: ["fade", 0.25],
+        slideleft: ["slideleft", 0.3],
+        slideright: ["slideright", 0.3],
+        circleopen: ["circleopen", 0.3],
+      };
+      const durs = segments.map((seg) => seg.out - seg.in);
+      const out = join(dir, "out.mp4");
+
+      if (segFiles.length === 1) {
+        const totalDur = durs[0];
+        await ffmpegRun([
+          "-y",
+          "-i",
+          segFiles[0],
+          "-vf",
+          overlayFilter({
+            edl,
+            totalDur,
+            accentHex: coach.accent_hex,
+            dir,
+            writeFileSync,
+          }),
+          "-af",
+          "loudnorm=I=-16:TP=-1.5:LRA=11",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "128k",
+          ...ENC_FINAL,
+          "-movflags",
+          "+faststart",
+          out,
+        ]);
+      } else {
+        const graph = [];
+        let acc = durs[0];
+        let vPrev = "0:v";
+        let aPrev = "0:a";
+        for (let i = 1; i < segFiles.length; i++) {
+          const [type, baseFd] =
+            XFADE[segments[i - 1].transition] ?? XFADE.fade;
+          // A crossfade can't be longer than the clips it joins — clamp it to
+          // half of each adjacent segment so any recipe (short beats, revised
+          // cuts) joins cleanly instead of erroring.
+          const fd = Math.max(
+            0.05,
+            Math.min(baseFd, durs[i - 1] / 2, durs[i] / 2),
+          );
+          const offset = Math.max(0, acc - fd).toFixed(3);
+          graph.push(
+            `[${vPrev}][${i}:v]xfade=transition=${type}:duration=${fd}:offset=${offset}[v${i}]`,
+          );
+          graph.push(`[${aPrev}][${i}:a]acrossfade=d=${fd}[a${i}]`);
+          vPrev = `v${i}`;
+          aPrev = `a${i}`;
+          acc = acc - fd + durs[i];
+        }
+        const totalDur = acc;
+        graph.push(
+          `[${vPrev}]${overlayFilter({ edl, totalDur, accentHex: coach.accent_hex, dir, writeFileSync })}[vout]`,
+        );
+        graph.push(`[${aPrev}]loudnorm=I=-16:TP=-1.5:LRA=11[aout]`);
+        await ffmpegRun([
+          "-y",
+          ...segFiles.flatMap((f) => ["-i", f]),
+          "-filter_complex",
+          graph.join(";"),
+          "-map",
+          "[vout]",
+          "-map",
+          "[aout]",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "128k",
+          ...ENC_FINAL,
+          "-movflags",
+          "+faststart",
+          out,
+        ]);
+      }
+      const totalDur = durs.reduce((a, d) => a + d, 0);
+
+      const folder = byId[segments[0].asset_id].storage_path
+        .split("/")
+        .slice(0, 2)
+        .join("/");
+      const storagePath = `${folder}/renders/${piece.id}.mp4`;
+      await uploadFrom(out, storagePath, "video/mp4");
+
+      const { data: videoAsset, error: vaErr } = await db
+        .from("media_assets")
+        .insert({
+          session_id: session.id,
+          storage_path: storagePath,
+          kind: "render",
+          duration_sec: totalDur,
+          width: 1080,
+          height: 1920,
+        })
+        .select("id")
+        .single();
+      if (vaErr) throw new Error(`render asset: ${vaErr.message}`);
+
+      const { error: upErr } = await db
+        .from("content_pieces")
+        .update({
+          render_asset_id: videoAsset.id,
+          status: piece.status === "rendering" ? "ready" : piece.status,
+        })
+        .eq("id", piece.id);
+      if (upErr) throw new Error(`update piece: ${upErr.message}`);
+      console.log(
+        `  rendered piece ${piece.id} (${segments.length} segment${segments.length === 1 ? "" : "s"})`,
+      );
+    });
+  }
+
+  return null; // pipeline complete — session becomes ready
+}
+
+/* ——— Revise: the coach's notes on a finished piece → re-edit ——— */
+export async function revise({ session }) {
+  const coach = await loadCoach(session);
+  const assets = await loadAssets(session.id);
+  const byId = Object.fromEntries(assets.map((a) => [a.id, a]));
+
+  // Usually undefined — cleanup removes transcripts once a session finishes,
+  // so the speech checks rarely fire on a re-cut. Better than silently scoring
+  // a revision against a different rulebook than the original.
+  const reviseSpeech = await loadSpeech(assets);
+
+  const { data: pieces, error } = await db
+    .from("content_pieces")
+    .select("*")
+    .eq("session_id", session.id)
+    .not("revision_note", "is", null);
+  if (error) throw new Error(`load revisions: ${error.message}`);
+  if (!pieces?.length) return "render";
+
+  const TRANSITIONS = ["cut", "fade", "slideleft", "slideright", "circleopen"];
+
+  for (const piece of pieces) {
+    const note = String(piece.revision_note).slice(0, 600);
+    const history = Array.isArray(piece.revision_history)
+      ? piece.revision_history
+      : [];
+    try {
+      // Which source clips does this piece use? Show Claude a few frames of
+      // each so it re-edits with real eyes on the footage (director vision).
+      const usedIds = [];
+      const segs0 = piece.edl?.segments?.length
+        ? piece.edl.segments
+        : [{ asset_id: piece.edl?.asset_id }];
+      for (const s of segs0)
+        if (s?.asset_id && byId[s.asset_id] && !usedIds.includes(s.asset_id))
+          usedIds.push(s.asset_id);
+      if (!usedIds.length) usedIds.push(...assets.map((a) => a.id).slice(0, 3));
+
+      const content = [
+        {
+          type: "text",
+          text:
+            "You are the coach's video editor. Apply the coach's revision to " +
+            "the existing piece below. Study the frames of the source clips " +
+            "first, then re-cut and rewrite ONLY as much as the request needs.",
+        },
+      ];
+      for (const aid of usedIds.slice(0, 4)) {
+        const a = byId[aid];
+        await withTmp(async (dir) => {
+          const local = await downloadTo(a.storage_path, join(dir, "in.mp4"));
+          const frames = await sampleFrames(local, a.duration_sec, dir, 3);
+          content.push({
+            type: "text",
+            text: `SOURCE ${aid} — ${Math.round(a.duration_sec ?? 0)}s · ${
+              (a.width ?? 0) > (a.height ?? 0) ? "landscape" : "vertical"
+            }`,
+          });
+          for (const f of frames) {
+            content.push({ type: "text", text: `  frame at t=${f.t}s:` });
+            content.push(await imageBlock(f.path));
+          }
+        });
+      }
+
+      content.push({
+        type: "text",
+        text: [
+          `Coach: ${coach.name}; sport=${coach.sport ?? "?"}; tones=${(
+            coach.tones ?? []
+          ).join(", ")}; mission=${coach.mission ?? "?"}.`,
+          coach.voice_memo_transcript
+            ? `Voice sample (STYLE ONLY — copy tone/rhythm, never its topic): "${coach.voice_memo_transcript.slice(
+                0,
+                700,
+              )}"`
+            : ``,
+          ``,
+          `THE CURRENT PIECE — kind=${
+            piece.piece_kind ?? piece.edl?.type ?? "reel"
+          }; why it exists: ${piece.director_intent ?? piece.why ?? ""}`,
+          JSON.stringify(
+            {
+              edl: piece.edl,
+              hook: piece.hook,
+              caption: piece.caption,
+              hashtags: piece.hashtags,
+              cta: piece.cta,
+            },
+            null,
+            1,
+          ),
+          ``,
+          `THE COACH'S REVISION REQUEST — plain English, honor it exactly. It`,
+          `may ask to re-cut, reorder, change pacing or length, or change the`,
+          `tone/feel. Change nothing they didn't ask about:`,
+          `"${note}"`,
+          ``,
+          `Rules: cuts may move anywhere inside the source durations. Reels max`,
+          `60s, stories max 15s. A single clean cut is ONE segment; multi-clip`,
+          `segments run 1-6s each with a "transition" per segment`,
+          `(cut|fade|slideleft|slideright|circleopen). Caption beats stay inside`,
+          `the cut (t=0 = start).`,
+          ``,
+          `Return ONLY this JSON object:`,
+          `{"edl": {"segments": [{"asset_id": "...", "in": 0, "out": 3, "transition": "cut"}],`,
+          `  "crop": {"mode": "center|eased", "start_x_frac": 0.5},`,
+          `  "captions": [{"text": "...", "t0": 0, "t1": 2.4, "style": "hook|body"}]},`,
+          ` "hook": "...", "caption": "...", "hashtags": "...", "cta": "...",`,
+          ` "why": "one sentence on what you changed"}`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      });
+
+      const reply = await askClaude({
+        system:
+          "You are a precise short-form video editor. You apply the coach's notes faithfully with real eyes on the footage, and reply with exactly one valid JSON object.",
+        content,
+        maxTokens: 4000,
+      });
+      const draft = extractJson(reply);
+
+      // Normalize + clamp the revised cut.
+      const maxLen = piece.format === "story" ? 15 : 60;
+      const rawSegs = draft.edl?.segments?.length
+        ? draft.edl.segments
+        : [
+            {
+              asset_id: draft.edl?.asset_id,
+              in: draft.edl?.in,
+              out: draft.edl?.out,
+            },
+          ];
+      let total = 0;
+      const segments = rawSegs
+        .map((seg) => {
+          const asset =
+            byId[seg.asset_id] ?? byId[piece.edl?.asset_id] ?? byId[usedIds[0]];
+          if (!asset) return null;
+          const hi = asset.duration_sec ?? Number(seg.out);
+          const start = Math.max(0, Math.min(Number(seg.in) || 0, hi - 1));
+          const end = Math.min(
+            hi,
+            Math.max(start + 1, Number(seg.out) || start + 1),
+          );
+          if (!(end - start >= 1)) return null;
+          return {
+            asset_id: asset.id,
+            in: start,
+            out: end,
+            transition: TRANSITIONS.includes(seg.transition)
+              ? seg.transition
+              : "cut",
+          };
+        })
+        .filter(Boolean)
+        .filter((seg) => {
+          if (total >= maxLen) return false;
+          total += seg.out - seg.in;
+          return true;
+        });
+
+      // The app now logs the ask the moment the coach makes it, so this note
+      // is usually already the last entry. Only append when it isn't —
+      // otherwise every revision would appear twice in the coach's memory and
+      // read as though they asked for the same change repeatedly.
+      const alreadyLogged = history[history.length - 1]?.note === note;
+      const newHistory = alreadyLogged
+        ? history
+        : [...history, { note, at: new Date().toISOString() }].slice(-12);
+
+      if (!segments.length) {
+        console.warn(
+          `revision for piece ${piece.id} produced no usable cut — skipped`,
+        );
+        await db
+          .from("content_pieces")
+          .update({
+            revision_note: null,
+            status: "ready",
+            revision_history: newHistory,
+          })
+          .eq("id", piece.id);
+        continue;
+      }
+
+      // Same one-caption-at-a-time guarantee as compose — a revision must not
+      // be able to reintroduce overprinted text.
+      const captions = orderCaptions(draft.edl?.captions, total);
+
+      // Fresh poster from the new opening (the cut may have moved).
+      const first = segments[0];
+      const firstAsset = byId[first.asset_id];
+      const folder = firstAsset.storage_path.split("/").slice(0, 2).join("/");
+      const posterStorage = `${folder}/posters/${piece.id}-rev${newHistory.length}.jpg`;
+      let posterAssetId = piece.edl?.poster_asset_id;
+      try {
+        await withTmp(async (dir) => {
+          const local = await downloadTo(
+            firstAsset.storage_path,
+            join(dir, "in.mp4"),
+          );
+          const poster = await posterFrame(
+            local,
+            first.in + (first.out - first.in) / 2,
+            join(dir, "poster.jpg"),
+          );
+          await uploadFrom(poster, posterStorage, "image/jpeg");
+        });
+        const { data: pa } = await db
+          .from("media_assets")
+          .insert({
+            session_id: session.id,
+            storage_path: posterStorage,
+            kind: "render",
+          })
+          .select("id")
+          .single();
+        if (pa) posterAssetId = pa.id;
+      } catch (e) {
+        console.warn(`  revise poster failed ${piece.id}: ${e.message}`);
+      }
+
+      const newEdl = {
+        segments,
+        type: piece.edl?.type,
+        poster_asset_id: posterAssetId,
+        crop: {
+          mode: draft.edl?.crop?.mode === "eased" ? "eased" : "center",
+          start_x_frac: Number(draft.edl?.crop?.start_x_frac ?? 0.5),
+        },
+        captions,
+        // Carried forward so the piece stays scorable against the director's
+        // original target across any number of revisions.
+        target_length_sec: piece.edl?.target_length_sec,
+      };
+
+      // A revision rewrites the cut, so the piece has to be re-scored — stale
+      // flags would describe a video that no longer exists.
+      const newHook = String(draft.hook ?? piece.hook ?? "").slice(0, 200);
+      const newFlags = scorePiece({
+        edl: newEdl,
+        hook: newHook,
+        targetLengthSec: piece.edl?.target_length_sec,
+        speech: reviseSpeech,
+      });
+      if (newFlags.length)
+        console.log(
+          `    ${piece.id} flags after revision: ${newFlags.join(", ")}`,
+        );
+
+      const patch = {
+        edl: newEdl,
+        flags: newFlags,
+        hook: newHook,
+        caption: String(draft.caption ?? piece.caption ?? "").slice(0, 2000),
+        hashtags: String(draft.hashtags ?? piece.hashtags ?? "").slice(0, 300),
+        cta: String(draft.cta ?? piece.cta ?? "").slice(0, 300),
+        why: String(draft.why ?? "Revised per your note.").slice(0, 500),
+        status: "rendering",
+        render_asset_id: null,
+        revision_note: null,
+        revision_history: newHistory,
+        revise_prompt_fp: PROMPT_FINGERPRINTS.revise,
+      };
+
+      let { error: upErr } = await db
+        .from("content_pieces")
+        .update(patch)
+        .eq("id", piece.id);
+      // Same rule as compose: missing telemetry columns must never cost the
+      // coach their revision.
+      if (upErr) {
+        ({ error: upErr } = await db
+          .from("content_pieces")
+          .update(withoutTelemetry(patch))
+          .eq("id", piece.id));
+      }
+      if (upErr) throw new Error(`apply revision: ${upErr.message}`);
+      console.log(`  revised piece ${piece.id}`);
+    } catch (e) {
+      // Most common cause: the original footage was already cleaned up, so we
+      // can't re-cut. Never leave the piece stuck — restore it unchanged.
+      console.warn(`  revise piece ${piece.id} skipped: ${e.message}`);
+      await db
+        .from("content_pieces")
+        .update({ status: "ready", revision_note: null })
+        .eq("id", piece.id);
+    }
+  }
+
+  return "render";
+}
+
+/* ——— Cleanup: free storage from artifacts and orphaned renders ——— */
+// Read an ENTIRE table, in pages, or throw.
+//
+// Both halves of that matter, and the old code got both wrong.
+//
+// PAGING: PostgREST caps how many rows one request returns. A truncated read
+// here is not a smaller cleanup, it is a WRONG one — pieces we failed to see
+// look unreferenced, so their reels become "orphans" and get deleted.
+//
+// THROWING: the old code destructured `{ data }` and ignored the error. If the
+// pieces query failed for any reason — a timeout, a dropped connection — `data`
+// came back undefined, `pieces ?? []` became an empty list, NOTHING looked
+// referenced, and every reel in the account was an orphan. One transient
+// network error could have deleted every finished reel Sideline had ever made.
+// A cleanup that cannot read is a cleanup that must not delete.
+async function readAll(table, columns, narrow) {
+  const PAGE = 1000;
+  const rows = [];
+  for (let from = 0; ; from += PAGE) {
+    let q = db
+      .from(table)
+      .select(columns)
+      .order("id", { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (narrow) q = narrow(q);
+    const { data, error } = await q;
+    if (error) throw new Error(`read ${table}: ${error.message}`);
+    rows.push(...(data ?? []));
+    if (!data || data.length < PAGE) return rows;
+  }
+}
+
+// Remove a set of files, then mark the rows they belonged to so a later run
+// knows not to bother. Returns how many files were actually handed to storage.
+//
+// `column` is artifacts_purged_at or file_purged_at. If that column does not
+// exist yet the mark fails — which is logged and swallowed, because the files
+// really were deleted and failing here would undo nothing. Cleanup simply keeps
+// over-reporting until the migration is run.
+async function purge(paths, assetIds, column) {
+  if (!paths.length) return 0;
+  for (const batch of chunks(paths, 100)) {
+    const { error } = await db.storage.from("raw").remove(batch);
+    if (error) throw new Error(`remove files: ${error.message}`);
+  }
+  const stamp = new Date().toISOString();
+  for (const batch of chunks(assetIds, 100)) {
+    const { error } = await db
+      .from("media_assets")
+      .update({ [column]: stamp })
+      .in("id", batch);
+    if (error) {
+      console.warn(
+        `  could not mark ${column} (${error.message}) — run supabase/v12-purge-tracking.sql`,
+      );
+      break;
+    }
+  }
+  return paths.length;
+}
+
+// Delete files nothing needs any more.
+//
+// Never scheduled until 2026-10-02 — it was complete, registered as a stage,
+// and unreachable, so 58% of the bucket was garbage it had always been meant to
+// collect. Now driven by the worker's idle loop (see index.js) rather than the
+// job chain, deliberately: a job carries a session, and a cleanup failure
+// routed through the job runner would have marked a coach's session FAILED over
+// a housekeeping error.
+//
+// Set CLEANUP_DRY_RUN=true to log exactly what would go without removing
+// anything.
+export async function cleanup() {
+  const dryRun = /^(1|true|yes)$/i.test(process.env.CLEANUP_DRY_RUN ?? "");
+
+  // Every read is complete-or-throw. Nothing is deleted on partial knowledge.
+  const [renderAssets, pieces, rawAssets, sessions] = await Promise.all([
+    readAll("media_assets", "id, storage_path", (q) => q.eq("kind", "render")),
+    readAll(
+      "content_pieces",
+      "id, session_id, render_asset_id, edl, status, reviewed_at, created_at",
+    ),
+    // The purge marks are read best-effort. Before v12-purge-tracking.sql has
+    // been run those columns do not exist, and cleanup still working — just
+    // noisily — beats cleanup refusing to run at all.
+    readAll(
+      "media_assets",
+      "id, storage_path, session_id, artifacts_purged_at, file_purged_at",
+      (q) => q.eq("kind", "raw"),
+    ).catch(async () => {
+      console.warn(
+        "  purge marks unavailable — run supabase/v12-purge-tracking.sql " +
+          "(cleanup will re-report already-deleted files until then)",
+      );
+      return readAll("media_assets", "id, storage_path, session_id", (q) =>
+        q.eq("kind", "raw"),
+      );
+    }),
+    readAll("sessions", "id, status, created_at"),
+  ]);
+
+  const plan = planCleanup({
+    renderAssets,
+    pieces,
+    rawAssets,
+    sessions,
+    now: Date.now(),
+  });
+
+  // A reel is unrecoverable once removed, so say what is about to happen and
+  // on what evidence. If the piece count ever looks wrong in these logs, the
+  // orphan count in the same line cannot be trusted either.
+  console.log(
+    `cleanup${dryRun ? " (DRY RUN)" : ""} — read ${pieces.length} pieces, ` +
+      `${renderAssets.length} renders, ${rawAssets.length} raw, ` +
+      `${sessions.length} sessions`,
+  );
+  console.log(
+    `  to remove: ${plan.orphanPaths.length} orphaned renders/posters, ` +
+      `${plan.expiredPaths.length} expired reels ` +
+      `(skipped >${SKIPPED_RETENTION_DAYS}d, approved >${APPROVED_RETENTION_DAYS}d), ` +
+      `${plan.artifactPaths.length} intermediates, ` +
+      `${plan.rawPaths.length} raw videos past ${RAW_RETENTION_DAYS} days`,
+  );
+  // Unreferenced files belonging to sessions that are not finished. Never
+  // deleted — a reel mid-render looks exactly like an orphan. Printed because a
+  // number that stays high means sessions are getting stuck, not that cleanup
+  // is being too careful.
+  if (plan.heldInFlight) {
+    console.log(
+      `  holding ${plan.heldInFlight} unreferenced file(s) — their session is ` +
+        `not finished yet`,
+    );
+  }
+
+  if (dryRun) {
+    for (const p of plan.orphanPaths.slice(0, 10))
+      console.log(`    would delete orphan: ${p}`);
+    if (plan.orphanPaths.length > 10)
+      console.log(`    …and ${plan.orphanPaths.length - 10} more orphans`);
+    for (const p of plan.expiredPaths.slice(0, 10))
+      console.log(`    would delete expired: ${p}`);
+    if (plan.expiredPaths.length > 10)
+      console.log(`    …and ${plan.expiredPaths.length - 10} more expired`);
+    console.log("cleanup dry run complete — nothing was deleted");
+    return null;
+  }
+
+  let removed = 0;
+
+  // Orphans and expired reels: the file AND its media_assets row. Deleting the
+  // row is what makes a cleared piece legible to the app — render_asset_id is
+  // ON DELETE SET NULL, so the piece reports "no video" by itself instead of
+  // handing the coach a player pointed at a file that is gone.
+  for (const batch of chunks(plan.assetsToDelete, 100)) {
+    const { error: rmErr } = await db.storage
+      .from("raw")
+      .remove(batch.map((o) => o.storage_path));
+    if (rmErr) throw new Error(`remove render files: ${rmErr.message}`);
+    const { error: delErr } = await db
+      .from("media_assets")
+      .delete()
+      .in(
+        "id",
+        batch.map((o) => o.id),
+      );
+    if (delErr) throw new Error(`delete render rows: ${delErr.message}`);
+    removed += batch.length;
+  }
+
+  // Intermediates and aged-out raw videos. Their media_assets rows are left in
+  // place: `moments` and each piece's edl reference raw asset ids, and dropping
+  // the rows would break the admin view and the learning history.
+  //
+  // So instead of deleting the row we MARK it, and the mark is what stops
+  // cleanup re-deleting the same already-gone files every six hours and
+  // reporting them as removed. Done in two passes rather than one because a
+  // clip's intermediates and the clip itself expire on different clocks.
+  //
+  // The files go first and the mark second, deliberately. If the removal throws
+  // we never mark, and the next run tries again. The reverse order could mark a
+  // file as purged that is still sitting there, and nothing would ever look at
+  // it again.
+  removed += await purge(plan.artifactPaths, plan.artifactAssetIds, "artifacts_purged_at");
+  removed += await purge(plan.rawPaths, plan.rawAssetIds, "file_purged_at");
+
+  console.log(`cleanup done — removed ${removed} files`);
+  return null;
+}
+
+/* ——— Stage: REFLECT — after a session is fully reviewed, write down what we
+   learned about this coach. Item 6 hands the director a list of what happened;
+   this hands it a conclusion. Runs on its own job, triggered by the app when
+   the last piece in a session gets a decision. ——— */
+export async function reflect({ session }) {
+  const coach = await loadCoach(session);
+
+  // One reflection per session. A re-run must not stack duplicates.
+  const { data: already } = await db
+    .from("coach_reflections")
+    .select("id")
+    .eq("session_id", session.id)
+    .maybeSingle();
+  if (already) {
+    console.log("  already reflected on this session");
+    return null;
+  }
+
+  const { data: pieces } = await db
+    .from("content_pieces")
+    .select(
+      "hook, caption, piece_kind, director_intent, status, skip_reason, skip_reason_text, revision_history, review_dwell_ms, detail_opened",
+    )
+    .eq("session_id", session.id);
+
+  const decided = (pieces ?? []).filter((p) =>
+    ["approved", "downloaded", "skipped"].includes(p.status),
+  );
+  // Nothing to learn from a session the coach never judged.
+  if (!decided.length) {
+    console.log("  nothing decided in this session — no reflection");
+    return null;
+  }
+
+  const describe = (p) => {
+    const kept = p.status !== "skipped";
+    const bits = [
+      `- [${p.piece_kind || "?"}] "${String(p.hook ?? "").slice(0, 100)}"`,
+      kept ? "KEPT" : "REJECTED",
+    ];
+    if (p.director_intent)
+      bits.push(`made because: ${String(p.director_intent).slice(0, 120)}`);
+    if (p.skip_reason) bits.push(`reason: ${p.skip_reason}`);
+    if (p.skip_reason_text)
+      bits.push(`they said: "${String(p.skip_reason_text).slice(0, 160)}"`);
+    const revs = (Array.isArray(p.revision_history) ? p.revision_history : [])
+      .map((r) => r?.note)
+      .filter(Boolean);
+    if (revs.length)
+      bits.push(
+        `they asked for changes: ${revs
+          .map((n) => `"${String(n).slice(0, 160)}"`)
+          .join(", ")}`,
+      );
+    if (Number.isFinite(Number(p.review_dwell_ms)))
+      bits.push(`decided in ${(Number(p.review_dwell_ms) / 1000).toFixed(1)}s`);
+    return bits.join(" · ");
+  };
+
+  // How much evidence exists in total, not just this session. Without this the
+  // model cannot tell whether it has seen 3 pieces or 300, and it will
+  // confidently generalise from either.
+  const { count: lifetime } = await db
+    .from("content_pieces")
+    .select("id", { count: "exact", head: true })
+    .in("status", ["approved", "downloaded", "skipped"])
+    .in(
+      "session_id",
+      (
+        await db.from("sessions").select("id").eq("coach_id", coach.id)
+      ).data?.map((r) => r.id) ?? [],
+    );
+  const totalDecisions = Number(lifetime ?? decided.length);
+
+  const reply = await askClaude({
+    system:
+      "You are Sideline's learning brain. You separate how a piece was MADE " +
+      "from which KINDS of piece a coach wants, because confusing the two " +
+      "makes the product worse. You reply with exactly one JSON object.",
+    content: [
+      {
+        type: "text",
+        text: [
+          `Coach: ${coach.name}; sport=${coach.sport ?? "?"}; audience=${coach.audience ?? "?"}; mission=${coach.mission ?? "?"}.`,
+          session.prompt
+            ? `What they asked for this session: "${String(session.prompt).slice(0, 300)}"`
+            : "They gave no request this session — the AI chose what to make.",
+          "",
+          "WHAT YOU MADE, AND WHAT THEY DID WITH IT:",
+          ...decided.map(describe),
+          "",
+          `EVIDENCE SO FAR: this coach has made ${totalDecisions} decision${
+            totalDecisions === 1 ? "" : "s"
+          } in total, across all sessions (${decided.length} in this one).`,
+          "",
+          "Write TWO separate things.",
+          "",
+          "1. craft_lesson — REQUIRED. What to do BETTER next time, about how",
+          "   pieces are made. This applies to EVERY kind of piece. Cut timing,",
+          "   hook length, letting a rep finish, repeated footage, copy that",
+          "   doesn't match the footage. Be specific and actionable — something",
+          "   you could follow tomorrow. If they approved something after a fix,",
+          "   note what worked, not only what failed.",
+          "",
+          "2. preference_note — USUALLY EMPTY. Only fill this in if there is",
+          "   real evidence that this coach does not want a KIND of piece at",
+          "   all — a pattern holding across MULTIPLE sessions, not one bad",
+          "   example. Leave it as \"\" otherwise.",
+          "",
+          "THE MISTAKE TO AVOID, and it is the whole reason these are separate:",
+          "a piece rejected for HOW IT WAS MADE is a craft lesson, never a",
+          "reason to stop making that kind. If they rejected a montage because",
+          "clips repeated, the lesson is \"do not reuse overlapping footage\" —",
+          "NOT \"make fewer montages\". The kinds are the menu; their feedback",
+          "is almost always about the cooking. Removing something from the menu",
+          "on thin evidence silently costs them content they would have wanted.",
+          "",
+          'Return ONLY: {"craft_lesson": "...", "preference_note": ""}',
+        ].join("\n"),
+      },
+    ],
+    maxTokens: 600,
+    label: "reflect",
+  });
+
+  const draft = extractJson(reply) ?? {};
+  const craft = String(draft.craft_lesson ?? "").trim();
+  const pref = String(draft.preference_note ?? "").trim();
+  if (!craft && !pref) {
+    console.warn("  reflection came back empty — nothing saved");
+    return null;
+  }
+
+  const note = {
+    coach_id: coach.id,
+    session_id: session.id,
+    craft_lesson: craft.slice(0, 1000) || null,
+    preference_note: pref.slice(0, 500) || null,
+    decisions_at_time: totalDecisions,
+    reflect_prompt_fp: PROMPT_FINGERPRINTS.reflect,
+    // Kept in sync so older readers and the admin view still work.
+    reflection: [craft, pref].filter(Boolean).join(" ").slice(0, 1000),
+  };
+  let { error } = await db.from("coach_reflections").insert(note);
+  // The fingerprint is a measurement; the lesson is the point. If that column
+  // is missing, save the lesson without it rather than losing both.
+  if (error) {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- omit idiom
+    const { reflect_prompt_fp, ...withoutFp } = note;
+    ({ error } = await db.from("coach_reflections").insert(withoutFp));
+    if (!error)
+      console.warn(
+        "  reflection saved without its fingerprint — run supabase/v11-prompt-fingerprints.sql",
+      );
+  }
+  if (error) {
+    // Never fail a job over a learning note. The coach already has their reels.
+    console.warn(`  reflection not saved (${error.message}) — run supabase/v10-reflection-split.sql`);
+    return null;
+  }
+  const text = craft || pref;
+  console.log(`  learned: ${text.slice(0, 160)}`);
+  return null;
+}
+
+export const STAGES = {
+  ingest,
+  direct,
+  transcribe,
+  understand,
+  compose,
+  render,
+  revise,
+  reflect,
+  cleanup,
+};

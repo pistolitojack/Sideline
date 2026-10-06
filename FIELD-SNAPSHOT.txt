@@ -1,0 +1,228 @@
+SIDELINE — FIELD SNAPSHOT
+Every table and column, and whether anything actually reads it.
+Generated from supabase/*.sql and the live code on 2026-10-06.
+
+===============================================================================
+THREE COLUMNS NOTHING READS  (found by generating this file)
+===============================================================================
+
+  coaches.is_active                  boolean   never read anywhere
+  media_assets.motion_peaks          jsonb     leftover from the motion-beat
+                                               experiment reverted in September
+  coach_reflections.reflect_prompt_version int superseded by reflect_prompt_fp
+                                               when prompt versions became
+                                               automatic; never written since
+
+None of these cost anything at this size, but they are the kind of thing that
+quietly accumulates. Worth a second opinion on whether to drop them.
+
+===============================================================================
+WHAT THE AI ACTUALLY SEES  (the question that matters most)
+===============================================================================
+
+Onboarding is not a signup form — it IS the AI's model of the coach. Below is
+every field a coach fills in and which AI stages read it. Derived by reading the
+prompt-building code, not guessed.
+
+  FIELD                  STAGES THAT READ IT                           USES
+  ---------------------- --------------------------------------------- ----
+  sport                  director, understand, composer, revise, reflect  5
+  mission                director, understand, composer, revise, reflect  5
+  audience               director, understand, composer, reflect          4
+  name                   composer, revise, reflect                        3
+  voice_memo_transcript  composer, revise                                 2
+  ig_profile (scraped)   director, composer                               2
+  tones                  composer, revise                                 2
+  city + state           director                                         1
+  accent_hex             RENDER ONLY — the AI never sees it               0
+  ig_handle              triggers the Instagram scan, nothing else        -
+
+NOTES THAT MATTER:
+
+  - SPORT AND MISSION reach every single AI stage. `understand` — which decides
+    what counts as a usable moment in each clip — is told the sport before it
+    looks at a frame. Get sport wrong and the AI is hunting for the wrong kind
+    of moment before any writing happens.
+
+  - MISSION steers the call-to-action directly: the composer is told to write a
+    cta "aimed at the coach's mission". This is why mission is capped at two
+    selections — "all four" gives the writer nothing to aim at.
+
+  - THE VOICE MEMO's content is deliberately discarded. The composer is told:
+    "copy STYLE only (tone, rhythm, word length), NEVER its topic or examples".
+    We keep the rhythm and throw away the philosophy. It is the richest thing a
+    coach gives us and we use half of it. This is an open question, not a bug —
+    changing it means loosening a rule that stops copy describing a different
+    exercise than the video shows, which was one of the September failures.
+
+  - ACCENT_HEX never reaches the AI. It is passed to ffmpeg to colour the burned
+    captions. That is why it keeps a default when every other field lost theirs:
+    a default colour is not a false claim about who the coach is.
+
+  - NOTHING asks what the coach SELLS, what a win looks like, or what they would
+    never post. Everything collected has an output; the gap is what is never
+    collected.
+
+===============================================================================
+RAW COLUMN INVENTORY
+===============================================================================
+
+HOW TO READ THE COUNTS: raw occurrences of the column name in that
+tree. They are a smoke signal, not proof — common words like `name`,
+`status` and `error` over-count badly. A ZERO is the interesting
+number: it means nothing anywhere mentions that column.
+
+===========================================================================
+TABLE  coaches   (16 columns)
+===========================================================================
+  column                     type              worker    app   note
+  -------------------------- ---------------- ------- ------   ----
+  id                         uuid primary key     464    498   
+  auth_user_id               uuid                   0      6   
+  name                       text                  12     34   
+  sport                      text                  13     22   
+  tones                      text[]                 4      8   
+  accent_hex                 text                   2      6   
+  audience                   text                   8     16   
+  mission                    text                  13     53   
+  ig_handle                  text                   2      4   
+  voice_memo_transcript      text                   4      6   
+  is_active                  boolean                0      0   <-- NOTHING READS THIS
+  created_at                 timestamptz           11     10   
+  state                      text                   5     40   
+  ig_profile                 text                   8      2   
+  city                       text                   1     62   
+  scanned_at                 timestamptz            7      0   
+
+===========================================================================
+TABLE  sessions   (12 columns)
+===========================================================================
+  column                     type              worker    app   note
+  -------------------------- ---------------- ------- ------   ----
+  id                         uuid primary key     464    498   
+  coach_id                   uuid                   5      8   
+  status                     text                  40     58   
+  created_at                 timestamptz           11     10   
+  brief                      text                   9      0   
+  montage                    boolean               11      1   
+  plan                       jsonb                 61      5   
+  prompt                     text                  52     44   
+  prompt_chip                text                   4      3   
+  prompt_source              text                   4      2   
+  prompt_length              int                    2      1   
+  prompt_dwell_ms            int                    0      1   
+
+===========================================================================
+TABLE  media_assets   (12 columns)
+===========================================================================
+  column                     type              worker    app   note
+  -------------------------- ---------------- ------- ------   ----
+  id                         uuid primary key     464    498   
+  session_id                 uuid                  30     11   
+  storage_path               text                  23      5   
+  kind                       text                  44     18   
+  duration_sec               double precision      16      1   
+  width                      int                    9     67   
+  height                     int                    9     38   
+  artifacts_purged_at        timestamptz            6      0   
+  file_purged_at             timestamptz            4      0   
+  cluster_id                 text                  18      0   
+  cluster_label              text                   1      0   
+  motion_peaks               jsonb                  0      0   <-- NOTHING READS THIS
+
+===========================================================================
+TABLE  moments   (9 columns)
+===========================================================================
+  column                     type              worker    app   note
+  -------------------------- ---------------- ------- ------   ----
+  id                         uuid primary key     464    498   
+  session_id                 uuid                  30     11   
+  asset_id                   uuid references media_assets      63     22   
+  t_start                    double precision       9      0   
+  t_end                      double precision      13      0   
+  type                       text                  44     79   
+  score                      double precision      22      1   
+  reason                     text                  31     28   
+  transcript_span            text                   2      0   
+
+===========================================================================
+TABLE  content_pieces   (37 columns)
+===========================================================================
+  column                     type              worker    app   note
+  -------------------------- ---------------- ------- ------   ----
+  id                         uuid primary key     464    498   
+  session_id                 uuid                  30     11   
+  format                     text check            18      7   
+  edl                        jsonb                 51     21   
+  render_asset_id            uuid references media_assets      15     12   
+  hook                       text                  48     28   
+  caption                    text                  45     38   
+  hashtags                   text                   9     11   
+  cta                        text                  10     18   
+  why                        text                  30     16   
+  suggested_slot             text                   3      3   
+  suggested_sound            text                   3      2   
+  status                     text                  40     58   
+  skip_reason                text                  12     10   
+  created_at                 timestamptz           11     10   
+  director_prompt_version    int                    1      2   
+  compose_prompt_version     int                    1      2   
+  revise_prompt_version      int                    1      2   
+  director_prompt_fp         text                   2      3   
+  compose_prompt_fp          text                   2      3   
+  revise_prompt_fp           text                   2      2   
+  revision_note              text                   5      1   
+  piece_kind                 text                   8      4   
+  director_intent            text                   8      4   
+  revision_history           jsonb                 10      5   
+  hook_rating                int                    0      6   
+  pacing_rating              int                    0      6   
+  copy_rating                int                    0      6   
+  would_post_rating          int                    0      8   
+  founder_notes              text                   0      7   
+  rated_at                   timestamptz            0      1   
+  flags                      jsonb                 22     17   
+  reviewed_at                timestamptz            4      2   
+  review_dwell_ms            int                    5      3   
+  detail_opened              boolean                3      2   
+  revision_count             int                    0      4   
+  skip_reason_text           text                   6      3   
+
+===========================================================================
+TABLE  jobs   (8 columns)
+===========================================================================
+  column                     type              worker    app   note
+  -------------------------- ---------------- ------- ------   ----
+  id                         uuid primary key     464    498   
+  session_id                 uuid                  30     11   
+  stage                      text                  36      3   
+  status                     text                  40     58   
+  attempts                   int                   14      0   
+  error                      text                  93     49   
+  created_at                 timestamptz           11     10   
+  updated_at                 timestamptz            6      0   
+
+===========================================================================
+TABLE  coach_reflections   (10 columns)
+===========================================================================
+  column                     type              worker    app   note
+  -------------------------- ---------------- ------- ------   ----
+  reflect_prompt_version     int                    0      0   <-- NOTHING READS THIS
+  craft_lesson               text                   6      0   
+  preference_note            text                   7      0   
+  decisions_at_time          int                    1      0   
+  reflect_prompt_fp          text                   2      0   
+  id                         uuid primary key     464    498   
+  coach_id                   uuid                   5      8   
+  session_id                 uuid references sessions      30     11   
+  reflection                 text                  20      1   
+  created_at                 timestamptz           11     10   
+
+===========================================================================
+TABLE  admins   (2 columns)
+===========================================================================
+  column                     type              worker    app   note
+  -------------------------- ---------------- ------- ------   ----
+  email                      text primary key       0     23   
+  created_at                 timestamptz           11     10   
+
