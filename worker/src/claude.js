@@ -4,7 +4,31 @@ import { readFile } from "node:fs/promises";
 // Model pinned by SPEC.md.
 export const MODEL = "claude-sonnet-4-6";
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// WHY THESE ARE SET EXPLICITLY
+//
+// They were not, so the SDK's defaults applied: a 10-minute timeout with 2
+// automatic retries. A request that never answers therefore blocks the worker
+// for up to 30 minutes — and because the worker is a single loop, that is not
+// one slow session, it is the whole pipeline stopped for every coach. The first
+// outside user hit exactly this: 17 minutes of total silence on `understand`,
+// job stuck in `running`, nothing in the logs, no error, no recovery.
+//
+// Real calls in production run 2-20 seconds. Three minutes is far beyond any
+// legitimate response, including the image-heavy director call, so a request
+// still running at that point is hung rather than slow. Worst case is now about
+// nine minutes across all retries instead of thirty, and it ends in a thrown
+// error the job runner can actually see and retry.
+const REQUEST_TIMEOUT_MS = Number(process.env.CLAUDE_TIMEOUT_MS || 180_000);
+const MAX_RETRIES = Number(process.env.CLAUDE_MAX_RETRIES || 2);
+
+// A call slower than this is worth noticing before it becomes a hang.
+const SLOW_CALL_MS = 45_000;
+
+const client = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  timeout: REQUEST_TIMEOUT_MS,
+  maxRetries: MAX_RETRIES,
+});
 
 // Mark the LAST block of a stable prefix (coach profile, sampled frames, voice
 // memo, IG summary). Everything up to and including that block is cached by
@@ -27,21 +51,38 @@ export async function askClaude({
       ? [{ type: "text", text: system, cache_control: { type: "ephemeral" } }]
       : system;
 
-  const res = await client.messages.create({
-    model: MODEL,
-    max_tokens: maxTokens,
-    system: sys,
-    messages: [{ role: "user", content }],
-  });
+  const startedAt = Date.now();
+  let res;
+  try {
+    res = await client.messages.create({
+      model: MODEL,
+      max_tokens: maxTokens,
+      system: sys,
+      messages: [{ role: "user", content }],
+    });
+  } catch (err) {
+    // Say how long we waited. A timeout and a rejected key look identical in a
+    // bare error message, and the difference decides what to go and fix.
+    const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
+    throw new Error(`${label} failed after ${secs}s: ${err.message}`);
+  }
 
+  const elapsedMs = Date.now() - startedAt;
   const u = res.usage ?? {};
   const write = u.cache_creation_input_tokens ?? 0;
   const read = u.cache_read_input_tokens ?? 0;
   console.log(
     `  [tokens] ${label}: in=${u.input_tokens ?? 0} cache_write=${write} ` +
       `cache_read=${read} out=${u.output_tokens ?? 0}` +
+      `  ${(elapsedMs / 1000).toFixed(1)}s` +
       (read > 0 ? "  <- cache HIT" : "")
   );
+  if (elapsedMs > SLOW_CALL_MS) {
+    console.warn(
+      `  SLOW: ${label} took ${(elapsedMs / 1000).toFixed(1)}s ` +
+        `(timeout is ${REQUEST_TIMEOUT_MS / 1000}s)`,
+    );
+  }
 
   return res.content
     .filter((b) => b.type === "text")
