@@ -1,0 +1,273 @@
+SIDELINE — WHERE THE APP STANDS, AND WHAT SHOULD HAPPEN NEXT
+A briefing for a planning conversation. Written 2026-10-06.
+
+I'm the founder — a former coach, not a programmer. Claude Code writes the code;
+I direct it, test on my phone, and judge the output. I want your honest read,
+including where you think we're going wrong.
+
+Everything factual below is read out of the code or the database, not
+remembered. Where I'm guessing I've said so.
+
+===============================================================================
+1. WHAT SIDELINE IS
+===============================================================================
+
+A coach films training on their phone, uploads the raw clips, and gets back
+finished vertical reels — cut, captioned, and written — without touching an
+editing app. They swipe to approve or skip, can send one back with a
+plain-English note, then download and post manually.
+
+STACK
+  Next.js on Vercel · Supabase (Postgres + RLS + storage) · a Node worker on
+  Railway running ffmpeg · Anthropic claude-sonnet-4-6 · Deepgram for
+  transcription · Apify for Instagram scraping · Resend for sign-in email.
+
+PIPELINE (a DB-polled job table, one stage at a time)
+  ingest → DIRECTOR (plans what pieces to make) → transcribe → understand
+  (finds usable moments per clip) → compose (picks the cuts, writes the copy)
+  → render (ffmpeg) → revise (when the coach asks for changes) → reflect
+  (the AI writes itself a note about the coach) → cleanup (housekeeping)
+
+COST
+  ~$0.35 per session, ~94% of it the AI rather than infrastructure.
+  $25/month Supabase Pro. Total spent building it: under $120.
+
+USERS
+  Two. Me, and my dad, who ran it for the first time on 2026-10-05.
+
+===============================================================================
+2. THE CONTEXT THAT EXPLAINS EVERY DECISION BELOW
+===============================================================================
+
+In September we stacked five changes to HOW THE AI DECIDES — thinking blocks,
+motion-based frame sampling, removing the numeric pacing rules, feeding measured
+"motion beats" to the editor, enforcing clip assignment in code — with no way to
+measure any of them.
+
+Output got dramatically worse. Reels with text printed over text. Two-second
+reels. Copy describing a different exercise than the video showed. We reverted
+the whole thing and lost a month.
+
+Two rules came out of it and they govern everything since:
+  - Never change how the AI decides without a way to measure whether it helped.
+  - A pre-selected default is worse than no answer, because the AI cannot tell
+    a default from a real one and reasons confidently from a lie.
+
+===============================================================================
+3. WHAT WE'VE BUILT RECENTLY  (20 commits, roughly five days)
+===============================================================================
+
+--- MEASUREMENT ---
+
+PROMPT VERSIONS ARE NOW AUTOMATIC. Each AI stage's "version" is an 8-character
+hash of the source of the function that builds its prompt. Previously a number
+typed by hand, which only worked while someone remembered — and a forgotten bump
+didn't blank the column, it stamped the OLD version onto a NEW prompt. It has
+since caught four changes nobody would have remembered to record, including one
+I made on a day I was thinking about storage.
+
+THE SCORECARD now runs NINE automatic structural checks on every piece before
+the coach sees it:
+    captions_overlap · captions_run_past_end · piece_too_short ·
+    segment_too_short · segment_too_long · footage_repeated · hook_too_long ·
+    cut_mid_word · ends_mid_sentence
+The last two were added yesterday (see §5). Every one is a yes/no fact read out
+of the edit list. Pure code, no I/O, ~100 tests.
+
+--- STORAGE (was unbounded, now has a ceiling) ---
+
+cleanup() existed, was registered as a stage, and NOTHING EVER CALLED IT. It had
+never run. 58% of the storage bucket was garbage it had been written to collect.
+
+Before scheduling it we found two bugs that would have fired the moment it ran:
+  - Reads ignored errors, so a failed query returned an empty list, nothing
+    looked referenced, and EVERY REEL IN THE ACCOUNT became an orphan. Verified
+    against the real planner: a failed read deletes 97 of 97 live reels.
+  - Reads weren't paginated, so a truncated piece list made unseen pieces look
+    unreferenced — the same failure, quieter.
+A third surfaced on first run: render inserts the media row and THEN links the
+piece to it, so a freshly made reel is briefly indistinguishable from an orphan.
+A Railway redeploy briefly runs two workers, and an idle one would have deleted
+the reel the busy one had just made.
+
+Result: 2,266 MB → 738 MB, verified in SQL. Retention windows now cap growth:
+skipped reels lose their video after 1 day (poster kept, 0.07MB vs 11.94MB),
+approved after 60 days. The point isn't the megabytes — without windows there is
+no steady state at all and every coach's footprint grows forever.
+
+--- ONBOARDING (the AI was being lied to) ---
+
+Everything was pre-selected: sport, tones, mission, colour. A coach who tapped
+straight through was saved as a Direct, Encouraging Speed & Agility coach
+chasing private clients, and the AI read every word as fact.
+
+Worse, and not on anyone's list: the Coach DNA screen printed "Audience read
+from your page: youth athletes & their parents" to anyone who entered an
+Instagram handle. Hardcoded. Nothing read it from their page. It told the coach
+a fabricated fact about themselves AND primed them to accept it two screens
+later, corrupting the one field we'd just fixed.
+
+Now: nothing pre-selected except the brand colour (which decides caption colour,
+not a claim about anyone). Sport, audience and mission are multi-select. Mission
+is capped at two, deliberately — every call-to-action is aimed at the mission,
+and "all four" gives the writer nothing to aim at. Sport has a free-text escape
+hatch, without which requiring an answer would force a lie. A missing value
+reaches the AI as "?" rather than a blank or the word "null".
+
+There is now a way back INTO onboarding from the app, with every answer
+pre-filled. Previously nothing linked to it and it didn't pre-fill, so the AI's
+entire model of a coach was effectively write-once.
+
+--- RELIABILITY (all three found by the first real session) ---
+
+NO TIMEOUT ON THE AI CALL. The SDK defaults applied — 10 minutes per attempt, 2
+retries — so a request that never answers blocked the single-threaded worker for
+up to 30 minutes. Now 3 minutes, ~9 worst case, ending in a real error.
+
+NO RECOVERY FOR AN ABANDONED JOB. A job is flipped to "running" the instant it's
+claimed, and nothing ever looks at "running" again. A worker that dies mid-run —
+Railway redeploys on every push — orphans it forever. The coach sees "cutting
+your session" until a human notices. Needed manual SQL twice in twenty minutes.
+Now reclaimed automatically on boot and when idle.
+
+SILENT STAGES. `understand` printed nothing between entering and leaving, so a
+hung worker looked exactly like a working one. Now logs per clip.
+
+--- THE INSTAGRAM BUG (the most expensive one) ---
+
+ig_profile was NULL for both coaches while the logs said "scanned IG @handle"
+every session. Two bugs behind one lie:
+  - The write result was never checked. Supabase returns errors in the result
+    object rather than throwing, so a failed save was invisible and the success
+    line printed anyway. We paid Apify to fetch the coach's real posts, paid
+    Claude to summarise them, and dropped the result — every session.
+  - It also ran too late, in `compose`, which is AFTER the director. So even
+    when it worked, a coach's first session was planned by a director told
+    "Instagram brand: not scanned" — the one session where it knows least.
+
+Both fixed. The scrape now runs at the top of `direct`. This is the single
+biggest upgrade to what the AI knows about a coach that we've made, and it had
+been silently broken the whole time.
+
+===============================================================================
+4. WHAT THE FIRST OUTSIDE USER SHOWED US
+===============================================================================
+
+My dad, 2026-10-05. Not a programmer, never seen the app.
+
+HE ASKED FOR THREE TEACHING VIDEOS. He got three teaching videos. He approved
+two and skipped one.
+
+His words on the two he kept: "good cutting, good prompting, good writing and a
+really great caption."
+
+HE SKIPPED THE THIRD BECAUSE A SENTENCE WAS CUT OFF MIDWAY. The scorecard had
+flagged that piece for `hook_too_long` and missed the actual reason entirely.
+
+THINGS THAT WORKED, validated on someone with no context:
+  - Multi-select ("Soccer, Speed & agility")
+  - City and state as two fields — he filled both. I'd typed just "GA" into the
+    single field it replaced, which is what prompted the change.
+  - He recorded the voice memo rather than skipping it
+  - He changed the brand colour, so defaults aren't blindly accepted
+  - Separate account, no contamination of my data
+
+THINGS HE SURFACED:
+  - He wanted to see the CAPTION after approving a reel. You couldn't — the
+    detail sheet showed the hook and nothing else, and the caption existed only
+    inside the Copy button's clipboard payload. You could copy words you had
+    never read. Fixed.
+  - He asked for multi-select on everything selectable. Built.
+  - His audience came back as a DUPLICATE: two chips plus the same thing
+    retyped as prose. My fault — multi-select made the free-text box additive
+    but the placeholder still read "Or describe them yourself…". "Or" means
+    instead-of. He followed the words and the words were wrong. Fixed.
+
+WHAT IT DOESN'T TELL US: teaching works. Hype, story, behind-the-scenes and
+client win have never been run end to end by anybody.
+
+===============================================================================
+5. THE THREE THINGS I THINK COME NEXT
+===============================================================================
+
+--- A. STOP THE MID-SENTENCE CUTS (half done) ---
+
+We can now DETECT them. We have not changed how the AI cuts — deliberately,
+because until yesterday there was no way to measure whether a change helped.
+
+What's left: run a session or two to get a baseline count, change the composer's
+instruction to respect speech boundaries, then compare using the prompt
+fingerprint to separate before from after.
+
+We can't measure backwards — the flags on existing pieces predate the checks,
+and re-scoring needs transcripts cleanup has already deleted.
+
+--- B. PHASE C: THE VISUAL LAYER (not started, detailed separately) ---
+
+The honest inventory of what the renderer does today:
+  ONE font (the Linux default, the only one installed in the container)
+  TWO caption styles (hook on a coloured box; body with an outline), both
+    static, both centred
+  FIVE transitions
+  The only thing that differs between two coaches is the accent colour.
+  NOTHING differs between a teaching reel and a hype reel.
+
+The AI writes differently for every coach. It does not LOOK different for any of
+them. For a product pitched as "an AI employee that learns YOUR style", that's
+the gap between what we claim and what we ship.
+
+--- C. THE SCORECARD-FEEDBACK IDEA (not started) ---
+
+Every piece records its flags. Nobody shows them to the AI. So it writes a
+13-word hook, the scorecard notices, and the AI never finds out. All three of my
+dad's hooks were over the 8-word limit; so were mine, consistently, for weeks.
+
+Telling the AI its own track record is cheap and — crucially — MEASURABLE. Count
+hook_too_long before, make the change, count after.
+
+===============================================================================
+6. WHAT'S STILL BROKEN OR UNKNOWN
+===============================================================================
+
+  - Hooks are consistently too long. 3 of 3 on the last session. Known cause
+    (the AI never sees its own flags), unfixed.
+  - footage_repeated still fires. We fixed one cause in September (the director
+    planning a reel longer than the footage supports) and it appeared twice in
+    three pieces yesterday, so there is a second cause we haven't found.
+  - Only ONE content format has ever been validated.
+  - Review-behaviour tracking (dwell time, whether the detail view was opened)
+    is silent and undisclosed. Fine while it's family; needs a privacy policy
+    before a pilot. [BLOCKER FOR ANY REAL PILOT]
+  - API keys that appeared in screenshots have not been regenerated. [BLOCKER]
+  - I don't know whether our captions sit UNDER Instagram's own UI overlay. If
+    they do, every caption we've burned has been partly covered. [CONFIRM]
+  - One lint error in Today.tsx, pre-existing, unrelated to anything above.
+
+===============================================================================
+7. WHAT I'M ASKING YOU
+===============================================================================
+
+1. IS THE ORDER RIGHT? My instinct is: finish the mid-sentence fix, then Phase C
+   (visual), then scorecard feedback. Tell me if that's wrong.
+
+2. ARE WE OVER-ENGINEERING THE MEASUREMENT? We now have a scorecard, prompt
+   fingerprints, review-behaviour tracking, self-written reflections and a
+   coach-memory block. That machinery exists because of the September failure.
+   Is any of it a maintenance trap I should cut?
+
+3. THE PATTERN I KEEP HITTING. Three separate times now the cause was the same
+   shape: a write whose result was never checked, and a log that reported
+   success anyway — the cleanup that said it removed 217 files while removing
+   none, the Instagram summary, the job claim. Is there a systematic fix, or is
+   it just discipline?
+
+4. AM I READY FOR A MULTI-COACH PILOT? The learning loop is per-coach and
+   demonstrably works. The visual layer is identical for everyone. Which of
+   those matters more for a pilot whose purpose is to find out whether coaches
+   want this?
+
+5. WHAT WOULD YOU DO THAT ISN'T ON MY LIST?
+
+Please be direct. If something I believe is wrong, say it's wrong and show me
+why — I'd much rather hear it now than three sessions later. That exact pattern
+cost this project a month in September.
