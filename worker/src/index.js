@@ -51,6 +51,73 @@ async function maybeCleanup() {
   }
 }
 
+// ——— orphaned jobs ———
+//
+// claimJob only ever looks for `pending`. A job is flipped to `running` the
+// instant it is claimed, so if the process dies in the middle — a Railway
+// redeploy, a crash, a platform restart — that job stays `running` forever.
+// Nothing retries it, nothing times it out, and the coach sees "cutting your
+// session" until somebody notices and fixes it by hand. That is what happened
+// to the first session run by someone other than the founder.
+//
+// There is also a narrower version of the same bug: the claim UPDATE succeeds
+// but its response never arrives, so the job is marked `running` while the
+// worker believes it claimed nothing. Same outcome, no crash required.
+//
+// A job older than this with no progress cannot be held by a live worker. The
+// threshold is deliberately generous — far longer than any real stage now that
+// AI calls are bounded — because reclaiming a job another worker is genuinely
+// working on would run the same stage twice.
+const STALE_JOB_MS = Number(process.env.STALE_JOB_MS || 15 * 60 * 1000);
+
+async function reclaimStaleJobs() {
+  const cutoff = new Date(Date.now() - STALE_JOB_MS).toISOString();
+  const { data: stale, error } = await db
+    .from("jobs")
+    .select("id, session_id, stage, attempts")
+    .eq("status", "running")
+    .lt("updated_at", cutoff);
+  if (error) {
+    console.error(`reclaim check failed: ${error.message}`);
+    return;
+  }
+  if (!stale?.length) return;
+
+  for (const job of stale) {
+    // Count the orphaning as an attempt. Without this a job that is somehow
+    // orphaned every time would be retried forever; with it, a coach gets a
+    // clear failure instead of a session that processes for eternity.
+    const attempts = (job.attempts ?? 0) + 1;
+    const giveUp = attempts >= MAX_ATTEMPTS;
+    await db
+      .from("jobs")
+      .update({
+        status: giveUp ? "failed" : "pending",
+        attempts,
+        error: giveUp
+          ? `abandoned at stage "${job.stage}" ${attempts} times — the worker stopped mid-run`
+          : null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", job.id)
+      // Only if nobody has touched it since we read it.
+      .eq("status", "running");
+    if (giveUp) {
+      await db
+        .from("sessions")
+        .update({ status: "failed" })
+        .eq("id", job.session_id);
+      console.error(
+        `session ${job.session_id}: giving up on "${job.stage}" after ${attempts} abandoned runs`,
+      );
+    } else {
+      console.log(
+        `session ${job.session_id}: reclaiming "${job.stage}" — abandoned mid-run (attempt ${attempts})`,
+      );
+    }
+  }
+}
+
 async function claimJob() {
   const { data: candidates, error } = await db
     .from("jobs")
@@ -156,6 +223,9 @@ async function loop() {
         ? " — DRY RUN, nothing will be deleted"
         : ""),
   );
+  // Immediately, not on the idle timer: this boot is very often the restart
+  // that orphaned a job in the first place, and the coach is already waiting.
+  await reclaimStaleJobs();
   for (;;) {
     try {
       const job = await claimJob();
@@ -168,7 +238,9 @@ async function loop() {
         continue; // check immediately for the next stage
       }
       // Nothing to do for any coach right now — a safe moment to take out the
-      // bins. Only reached when claimJob() found no pending work.
+      // bins and to look for work somebody else dropped. Only reached when
+      // claimJob() found no pending work, so neither can delay a coach.
+      await reclaimStaleJobs();
       await maybeCleanup();
     } catch (err) {
       console.error("loop error:", err.message);
