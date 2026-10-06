@@ -498,7 +498,17 @@ export async function understand({ session }) {
   const assets = await loadAssets(session.id);
   const coach = await loadCoach(session);
 
+  // Per-clip progress. This stage used to print nothing at all between "→
+  // understand…" and the next stage, so a worker hung inside it looked exactly
+  // like a worker doing careful work — 17 minutes of silence, with no way to
+  // tell which. One line per clip makes a stall visible while it is happening
+  // instead of after someone goes looking in the database.
+  let clipNo = 0;
   for (const asset of assets) {
+    clipNo++;
+    console.log(
+      `  clip ${clipNo}/${assets.length} (${asset.duration_sec?.toFixed?.(1) ?? "?"}s) — sampling frames…`,
+    );
     const transcript = await downloadJson(
       artifactPath(asset, "transcript.json"),
     ).catch(() => ({ text: "", words: [] }));
@@ -506,6 +516,7 @@ export async function understand({ session }) {
     const moments = await withTmp(async (dir) => {
       const local = await downloadTo(asset.storage_path, join(dir, "in.mp4"));
       const frames = await sampleFrames(local, asset.duration_sec, dir, 40);
+      console.log(`  clip ${clipNo}/${assets.length} — ${frames.length} frames, asking Claude…`);
       const content = [];
       for (const f of frames) {
         content.push({ type: "text", text: `Frame at t=${f.t}s:` });
@@ -583,6 +594,11 @@ export async function understand({ session }) {
       const { error } = await db.from("moments").insert(valid);
       if (error) throw new Error(`insert moments: ${error.message}`);
     }
+    // Closes the loop on this clip. A count of 0 here is itself worth seeing:
+    // a clip that yields no moments gives the composer nothing to cut from.
+    console.log(
+      `  clip ${clipNo}/${assets.length} — ${valid.length} moment(s) found`,
+    );
   }
   return "compose";
 }

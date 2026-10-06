@@ -1,5 +1,47 @@
 # Sideline — Build Progress
 
+## Item 7 — three worker fixes, all found by the first real session (2026-10-06) ✅
+
+The first upload by someone other than the founder stalled twice and needed
+manual SQL both times. The session itself was fine — 3 clips, 3 reels — but
+getting it through exposed three gaps that all have the same shape: **nothing in
+the worker recovers from a stall.**
+
+**1. No timeout on the Claude call.** The SDK defaults applied — 10 minutes per
+attempt, 2 automatic retries — so a request that never answers blocks for up to
+30 minutes. The worker is a single loop, so that is not one slow session, it is
+the whole pipeline stopped for every coach. The real symptom was 17 minutes of
+silence on `understand`, no error, no recovery; the same stage finished in 37
+seconds after a restart, so it was a hang, not slow footage. Now 3 minutes per
+attempt with 2 retries (~9 min worst case), ending in a thrown error the job
+runner can see. Every call now logs its duration and warns above 45s.
+
+**2. No recovery for an abandoned job.** `claimJob` only looks for `pending`, and
+a job is flipped to `running` the moment it is claimed — so a worker that dies
+mid-run leaves it `running` forever. Nothing retries it. The coach sees "cutting
+your session" until a human notices. Railway redeploys on every push to `main`,
+so this fires on ordinary work, not just crashes. There is also a narrower
+version with no crash: the claim UPDATE lands but its response never arrives, so
+the row says `running` while the worker thinks it claimed nothing.
+
+Jobs sitting in `running` with no progress for 15 minutes are now handed back to
+`pending` — on boot (that boot is usually the restart that caused it, and the
+coach is already waiting) and whenever the worker is idle. The threshold is
+deliberately generous, since reclaiming a job another worker genuinely holds
+would run the same stage twice. Reclaiming counts as an attempt, so a job
+orphaned every time ends in an honest failure rather than retrying forever.
+
+**3. `understand` printed nothing at all.** Between "→ understand…" and the next
+stage there was no output, so a hung worker and a working one looked identical.
+It now logs per clip: sampling, frame count, and how many moments were found. A
+count of 0 is worth seeing on its own — a clip yielding no moments gives the
+composer nothing to cut from.
+
+All four prompt fingerprints unchanged, confirming no prompt was touched.
+
+**Shipped as three commits in one push, deliberately:** each deploy restarts the
+worker, and a restart at the wrong moment is the bug being fixed.
+
 ## Item 6 — multi-select on sport, audience and mission (2026-10-05) ✅
 
 **The first change driven by someone other than the founder.** Jack's dad ran
