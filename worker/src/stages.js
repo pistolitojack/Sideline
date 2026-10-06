@@ -341,6 +341,18 @@ function normalizePlan(raw, assets) {
 export async function direct({ session }) {
   const assets = await loadAssets(session.id);
   const coach = await loadCoach(session);
+  // Scrape the coach's Instagram HERE, not in compose.
+  //
+  // It used to run at compose time, which is after this stage — so on a coach's
+  // very first session the director planned the whole pack having been told
+  // "Instagram brand: not scanned", and only sessions from the second onwards
+  // benefited. The first session is exactly the one where the director knows
+  // least about them and the brand summary is worth most.
+  //
+  // compose re-reads the coach row, so it still gets the summary from here.
+  // Costs one scrape on the first session only; afterwards IG_RESCAN_MS makes
+  // this a no-op.
+  await ensureIgProfile(coach);
   const prompt = String(session.prompt ?? session.brief ?? "").trim();
   const framesPer = assets.length > 4 ? 3 : 4;
 
@@ -652,13 +664,35 @@ async function ensureIgProfile(coach) {
     });
     const summary = reply.trim().slice(0, 2000);
     const scannedAt = new Date().toISOString();
-    await db
+
+    // CHECK THE WRITE. It was not checked, and Supabase returns errors in the
+    // result object rather than throwing — so a failed save was invisible and
+    // the line below cheerfully logged "scanned IG @handle" anyway. Both coach
+    // rows had ig_profile null while the logs claimed success every session,
+    // which meant the director and composer never once saw a coach's real brand
+    // voice. We paid Apify for it and threw it away.
+    let { error: saveErr } = await db
       .from("coaches")
       .update({ ig_profile: summary, scanned_at: scannedAt })
       .eq("id", coach.id);
+
+    // The summary is the point; scanned_at only decides when to re-scan. If
+    // that column is missing, keep the summary rather than losing both.
+    if (saveErr) {
+      ({ error: saveErr } = await db
+        .from("coaches")
+        .update({ ig_profile: summary })
+        .eq("id", coach.id));
+      if (!saveErr)
+        console.warn(
+          "  saved IG summary without scanned_at — run supabase/v6-ig-refresh.sql",
+        );
+    }
+    if (saveErr) throw new Error(`saving the summary failed: ${saveErr.message}`);
+
     coach.ig_profile = summary;
     coach.scanned_at = scannedAt;
-    console.log(`  scanned IG @${handle}`);
+    console.log(`  scanned IG @${handle} — ${summary.length} chars saved`);
   } catch (e) {
     console.warn(`ig scan skipped: ${e.message}`);
   }
@@ -666,6 +700,8 @@ async function ensureIgProfile(coach) {
 
 /* ——— Stage 4: Claude writes each piece (EDL + copy) ——— */
 export async function compose({ session }) {
+  // The scan now happens in direct(), two stages earlier, so the director sees
+  // it too. loadCoach re-reads the row, so the summary is already here.
   const coach = await loadCoach(session);
   await ensureIgProfile(coach);
   const assets = await loadAssets(session.id);
