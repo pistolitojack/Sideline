@@ -698,6 +698,24 @@ async function ensureIgProfile(coach) {
   }
 }
 
+
+// Word timings for the scorecard's speech checks, keyed by asset.
+//
+// Best effort on purpose. Transcripts are per-session artifacts that cleanup
+// removes once a session finishes, so on a revision they are usually gone — in
+// which case the speech checks simply do not fire. A missing transcript must
+// never invent a defect, and must never fail a stage.
+async function loadSpeech(assets) {
+  const speech = {};
+  for (const a of assets) {
+    const t = await downloadJson(artifactPath(a, "transcript.json")).catch(
+      () => null,
+    );
+    if (Array.isArray(t?.words) && t.words.length) speech[a.id] = t.words;
+  }
+  return Object.keys(speech).length ? speech : undefined;
+}
+
 /* ——— Stage 4: Claude writes each piece (EDL + copy) ——— */
 export async function compose({ session }) {
   // The scan now happens in direct(), two stages earlier, so the director sees
@@ -706,6 +724,8 @@ export async function compose({ session }) {
   await ensureIgProfile(coach);
   const assets = await loadAssets(session.id);
   const byId = Object.fromEntries(assets.map((a) => [a.id, a]));
+  // Loaded once for the whole session rather than per piece.
+  const speech = await loadSpeech(assets);
 
   const { data: allMoments, error } = await db
     .from("moments")
@@ -750,6 +770,7 @@ export async function compose({ session }) {
         allMoments,
         pp,
         clusterAssets,
+        speech,
       });
       if (ok) made++;
     } catch (e) {
@@ -771,6 +792,7 @@ async function composePlannedPiece({
   allMoments,
   pp,
   clusterAssets,
+  speech,
 }) {
   // Which moments may this piece draw from?
   let pool = allMoments;
@@ -968,6 +990,7 @@ async function composePlannedPiece({
     edl,
     hook: draft.hook,
     targetLengthSec: target,
+    speech,
   });
   if (flags.length)
     console.log(`    ${pp.piece_id} flags: ${flags.join(", ")}`);
@@ -1351,6 +1374,11 @@ export async function revise({ session }) {
   const assets = await loadAssets(session.id);
   const byId = Object.fromEntries(assets.map((a) => [a.id, a]));
 
+  // Usually undefined — cleanup removes transcripts once a session finishes,
+  // so the speech checks rarely fire on a re-cut. Better than silently scoring
+  // a revision against a different rulebook than the original.
+  const reviseSpeech = await loadSpeech(assets);
+
   const { data: pieces, error } = await db
     .from("content_pieces")
     .select("*")
@@ -1585,6 +1613,7 @@ export async function revise({ session }) {
         edl: newEdl,
         hook: newHook,
         targetLengthSec: piece.edl?.target_length_sec,
+        speech: reviseSpeech,
       });
       if (newFlags.length)
         console.log(

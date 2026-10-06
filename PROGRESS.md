@@ -1,5 +1,48 @@
 # Sideline — Build Progress
 
+## Item 10 — the scorecard can now hear (2026-10-06) ✅
+
+**The gap.** The first outside coach rejected a reel for "a sentence that was
+incomplete in the video". The scorecard flagged that piece for `hook_too_long`
+and missed the actual reason entirely — seven checks and not one asked whether a
+cut chopped the speaker off. We could not fix what we could not count.
+
+**Two new checks**, both as objective as the rest. Deepgram returns word-level
+timings and we already store `punctuated_word`, so real sentence boundaries are
+available rather than guessed:
+
+- **`cut_mid_word`** — a cut lands inside a word at either end of any segment.
+  Unambiguous: the listener hears half a syllable. No judgement needed about
+  whether the sentence was "finished".
+- **`ends_mid_sentence`** — the reel's final cut leaves the speaker mid-flow.
+  Requires BOTH that the last audible word does not close a sentence AND that
+  speech resumes within 0.35s, so a piece ending on a quiet beat is not flagged.
+
+**The false positives mattered more than the true ones.** A wrong "you cut them
+off" would push the editor into padding every cut with silence, which is worse
+than the defect. Seven of the eleven new tests assert that nothing fires: cutting
+after a full stop, cutting into the gap between sentences, silent footage, a
+missing transcript, words with broken timings, and speech belonging to a clip the
+piece never used.
+
+Two test expectations were wrong and the code was right — cutting at 3.0s lands
+*after* "this." completes, which is a clean sentence boundary, and a cut can
+legitimately trip both checks at once. The fixture now carries a breath inside
+the second sentence so the two can be exercised independently.
+
+**Wiring:** transcripts are loaded once per session in `compose` and passed to
+the scorecard. In `revise` it is best-effort and usually absent, because cleanup
+removes transcripts the moment a session finishes — the checks then simply do not
+fire rather than inventing a defect.
+
+Compose `b4084ba4` → `bc1e65bd` and revise `dc084722` → `e1a1092a`; director and
+reflect unchanged.
+
+**Measurement first, deliberately.** Nothing about how the AI cuts has changed
+yet. The next step is to count how often these fire across real sessions, then
+change the cutting instructions and measure whether the count drops — the loop
+built in Phase 3 and never yet used on a cutting problem.
+
 ## Item 9 — show the caption after a reel is approved (2026-10-06) ✅
 
 **Asked for by the first coach who is not the founder.** After approving a reel
